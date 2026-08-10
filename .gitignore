@@ -1,0 +1,25 @@
+# Secretos - NUNCA subir
+.env
+.env.local
+.env*.local
+firmware/**/secrets.h
+**/secrets.h
+
+# Node / Vercel / Expo
+node_modules/
+.vercel/
+.expo/
+dist/
+build/
+*.log
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.pyc
+__pycache__/
