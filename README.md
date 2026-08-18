@@ -37,3 +37,4 @@ Ver `docs/HaloPlus_Guia_de_Construccion.docx`, secciones 4 a 6, para el detalle 
 ## Licencia
 
 Este repositorio construye sobre proyectos de código abierto de terceros (ver enlaces arriba). El código propio de este equipo (`firmware/haptic/`, `api/hazards.js`, `sql/`) se distribuye bajo los mismos términos que el proyecto base, salvo que el equipo indique lo contrario.
+ta bien esta prueba :V
