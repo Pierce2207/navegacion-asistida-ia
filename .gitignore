@@ -23,3 +23,5 @@ build/
 Thumbs.db
 *.pyc
 __pycache__/
+
+.vercel
