@@ -8,12 +8,19 @@
 #include "deepgram_client.h"
 #include "settings_manager.h"
 #include <ArduinoJson.h>
+#include "haptic_driver.h"
 
 VisionAssistant visionAssistant;
 TTS tts;
 DeepgramClient deepgramClient(DEEPGRAM_API_KEY);
 SettingsManager settingsManager(NOTIFICATIONS_API_URL);
+HapticDriver haptics;
 bool ttsAvailable = false;
+bool hapticsAvailable = false;
+
+// GPS state for the shared hazard network check (separate from the places-API tracker)
+GPSData last_hazard_check_gps;
+unsigned long last_hazard_check_time = 0;
 
 // Button Pin for Push-to-Talk and SOS
 const int BUTTON_PIN = 15;
@@ -91,6 +98,7 @@ bool isAudioSilent();
 void processRecordedCommand();
 void handleButton();
 void checkAndAnnounceNearbyPlaces();
+void checkNearbyHazards();
 String stripHtmlTags(const String& html);
 
 // Tool call handler for system actions
@@ -486,6 +494,19 @@ void handleSystemAction(const JsonDocument& doc) {
         if (!message.isEmpty() && ttsAvailable) {
             tts.speakText(message);
         }
+        // Trigger directional haptic feedback so the alert doesn't rely on audio alone
+        if (hapticsAvailable) {
+            String direction = doc["direction"].as<String>();
+            HazardDirection d = HazardDirection::UNKNOWN;
+            if (direction == "left") d = HazardDirection::LEFT;
+            else if (direction == "center") d = HazardDirection::CENTER;
+            else if (direction == "right") d = HazardDirection::RIGHT;
+            if (d != HazardDirection::UNKNOWN) {
+                haptics.triggerDirection(d);
+            } else {
+                Serial.println("⚠️ obstacle_alert had no valid direction - skipping haptic pulse");
+            }
+        }
     }
     else if (intent == "contextual_assistance") {
         Serial.println("🗺️ Contextual assistance provided");
@@ -727,7 +748,20 @@ void setup() {
         delay(2000);
     }
     Serial.println("Vision Assistant initialized successfully!");
-    
+
+    // Initialize haptic feedback module (PCF8574 I2C expander + 3 vibration motors).
+    // GPIO0/GPIO3 are used because every other pin is taken by the camera or GPS
+    // (see camera_pins.h and gps_module.h) - GPIO0 is a boot-strapping pin, so this
+    // carries some risk if the PCF8574 pulls it low during boot. See firmware/haptic
+    // /INTEGRACION.md and the construction guide (section 8.1) for wiring details, and
+    // consider a separate coprocessor if boot becomes unreliable.
+    hapticsAvailable = haptics.initialize(/*sda=*/0, /*scl=*/3);
+    if (!hapticsAvailable) {
+        Serial.println("Warning: Haptic driver not found on I2C bus - continuing without haptic feedback");
+    } else {
+        Serial.println("Haptic driver initialized successfully!");
+    }
+
     // Initialize language settings after WiFi is connected
     initializeLanguageSettings();
     
@@ -1351,6 +1385,60 @@ void checkAndAnnounceNearbyPlaces() {
     http.end();
 }
 
+// Queries the shared hazard network (api/hazards.js) for verified hazards near the
+// user's current GPS position, and pulses the haptic motors if one is close.
+//
+// NOTE: this firmware has no compass/heading source (TinyGPS++'s course-over-ground
+// requires sustained movement and isn't reliable at walking speed), so unlike the
+// Gemini-camera alerts we can't reliably compute whether the hazard is to the
+// user's left/right - it always pulses MOTOR_CENTER as a general "hazard nearby"
+// warning. If a compass module is added later, replace the CENTER trigger below
+// with a bearing calculation (see firmware/haptic/INTEGRACION.md, section 3).
+void checkNearbyHazards() {
+    const unsigned long HAZARD_CHECK_INTERVAL = 5000; // ms between network checks
+    const float HAZARD_ALERT_RADIUS_M = 15.0;         // matches MERGE_RADIUS_M in api/hazards.js
+
+    if (millis() - last_hazard_check_time < HAZARD_CHECK_INTERVAL) {
+        return;
+    }
+    last_hazard_check_time = millis();
+
+    if (!hapticsAvailable || WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+
+    GPSData current_gps_data = visionAssistant.getCurrentGPSData();
+    if (!current_gps_data.isValid) {
+        return;
+    }
+    last_hazard_check_gps = current_gps_data;
+
+    HTTPClient http;
+    String url = String(HAZARDS_API_URL) + "/api/hazards?lat=" +
+                 String(current_gps_data.latitude, 6) + "&lon=" +
+                 String(current_gps_data.longitude, 6) + "&radius=100";
+
+    http.begin(url);
+    int httpResponseCode = http.GET();
+
+    if (httpResponseCode == 200) {
+        String payload = http.getString();
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, payload);
+        if (!error && doc.is<JsonArray>() && doc.size() > 0) {
+            float closestDistance = doc[0]["distance_m"].as<float>();
+            String category = doc[0]["category"].as<String>();
+            if (closestDistance <= HAZARD_ALERT_RADIUS_M) {
+                Serial.printf("⚠️ Shared hazard nearby: %s (%.1fm away)\n", category.c_str(), closestDistance);
+                haptics.triggerDirection(HazardDirection::CENTER);
+            }
+        }
+    } else if (httpResponseCode > 0) {
+        Serial.printf("Hazard network check failed, HTTP %d\n", httpResponseCode);
+    }
+    http.end();
+}
+
 String stripHtmlTags(const String& html) {
     String text = "";
     bool inTag = false;
@@ -1387,7 +1475,13 @@ void loop() {
 
     // Check for nearby places
     checkAndAnnounceNearbyPlaces();
-    
+
+    // Check the shared hazard network and turn off any haptic motors whose pulse ended
+    checkNearbyHazards();
+    if (hapticsAvailable) {
+        haptics.update();
+    }
+
     // Check for commands from the audio task
     CommandMessage cmdMsg;
     if (xQueueReceive(commandQueue, &cmdMsg, 0) == pdTRUE) {

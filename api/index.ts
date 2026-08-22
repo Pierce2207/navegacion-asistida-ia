@@ -21,18 +21,35 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey)
 
-const serviceAccountPath = path.join(__dirname, "../serviceAccountKey.json");
+// Firebase credentials: prefer FIREBASE_SERVICE_ACCOUNT (the service account JSON,
+// pasted as a single-line env var - this is what Vercel deployments use, since a
+// gitignored file never makes it into the deployment). Falls back to a local
+// serviceAccountKey.json file for local dev if someone still has one on disk.
+// If neither is present, Firebase stays disabled and only /notifications (the one
+// route that needs it) returns an error - everything else (settings, alerts) still works.
+let firebaseAvailable = false;
+try {
+  let serviceAccount;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } else {
+    const serviceAccountPath = path.join(__dirname, "../serviceAccountKey.json");
+    if (fs.existsSync(serviceAccountPath)) {
+      serviceAccount = require(serviceAccountPath);
+    }
+  }
 
-if (!fs.existsSync(serviceAccountPath)) {
-  throw new Error("serviceAccountKey.json not found in project root - download it from the Firebase console (Project settings > Service accounts)");
+  if (serviceAccount) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    firebaseAvailable = true;
+  } else {
+    console.warn("Firebase not configured (no FIREBASE_SERVICE_ACCOUNT env var or serviceAccountKey.json) - /notifications will be disabled, everything else still works.");
+  }
+} catch (err) {
+  console.error("Failed to initialize Firebase:", err);
 }
-
-const serviceAccount = require(serviceAccountPath);
-
-// Initialize Firebase
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
 
 app.get("/settings", async (req, res) => {
   try {
@@ -173,6 +190,25 @@ app.post("/notifications", async (req, res) => {
   try {
     const data = req.body;
     console.log(data);
+
+    if (!firebaseAvailable) {
+      // Still persist the alert so nothing is lost, just skip the push notification.
+      const { error: insertError } = await supabase
+        .from('alerts')
+        .insert({
+          device_id: data.device_id || 'companion_app',
+          type: alertTypes.includes(data.alert_type) ? data.alert_type : 'help',
+          message: data.message,
+          location: data.location,
+          priority: alertPriorities.includes(data.severity) ? data.severity : 'medium',
+          status: 'active',
+          timestamp: new Date().toISOString(),
+        });
+      return res.status(503).json({
+        error: "Push notifications not configured (missing FIREBASE_SERVICE_ACCOUNT)",
+        alert_saved: !insertError,
+      });
+    }
 
     // Persist before delivery so an alert is never lost to a missing token
     // Firmware payload maps to alerts columns: alert_type -> type, severity -> priority

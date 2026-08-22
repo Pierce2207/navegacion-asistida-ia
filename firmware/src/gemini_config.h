@@ -31,9 +31,10 @@ BEHAVIORAL RULES:
 - If you already responded to a direct request/command or spoke a message, do NOT speak the same message again in response to the same thing.
 
 DANGER DETECTION (intent=obstacle_alert):
-- If a cyclist is approaching: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, message='Warning. Someone is biking toward you.'
-- If approaching stairs/drop: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, message='Caution. Stairs ahead.'
-- If a head-level obstacle is ahead: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, message='Watch out. Head-level obstacle.'
+- Always include 'direction' (left/center/right) when intent=obstacle_alert, based on which part of the camera frame the hazard appears in.
+- If a cyclist is approaching: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, message='Warning. Someone is biking toward you.'
+- If approaching stairs/drop: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, message='Caution. Stairs ahead.'
+- If a head-level obstacle is ahead: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, message='Watch out. Head-level obstacle.'
 
 CONTEXT-AWARE ASSISTANCE (intent=contextual_assistance):
 - At a crosswalk with active traffic: Call 'systemAction' with intent='contextual_assistance', shouldSpeak=true, message='You are at a crosswalk. Wait, traffic is active.'
@@ -85,6 +86,10 @@ const char* const TOOLS_JSON = R"({
           "logEntry": {
             "type": "string",
             "description": "A detailed log message for internal history or debugging."
+          },
+          "direction": {
+            "type": "string",
+            "description": "Only if intent=obstacle_alert: which side of the frame the hazard is on. Values: left, center, right."
           }
         },
         "required": ["intent", "shouldSpeak"]
