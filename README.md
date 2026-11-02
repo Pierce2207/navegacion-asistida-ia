@@ -12,7 +12,7 @@ Este proyecto parte del hardware y firmware de **Halo**, un asistente portátil 
 
 Sobre esa base, nuestro equipo añade dos componentes propios:
 
-1. **Retroalimentación háptica direccional** (`firmware/haptic/`) — 3 motores de vibración (izquierda/centro/derecha) que avisan peligros sin depender del canal de voz, activados por las alertas de Gemini y por la red de peligros compartidos.
+1. **Retroalimentación háptica direccional** (`firmware/lib/haptic/`) — 3 motores de vibración (izquierda/centro/derecha) que avisan peligros sin depender del canal de voz, activados por las alertas de Gemini y por la red de peligros compartidos.
 2. **Red comunitaria de peligros compartidos** (`api/hazards.js`, `sql/hazards_schema.sql`) — los peligros detectados por un dispositivo, una vez confirmados por varios usuarios independientes, se comparten con otros dispositivos Halo cercanos antes de que su propia cámara los detecte.
 
 Ver `docs/` para la guía de construcción completa (lista de materiales, conexiones, costos) y el detalle de diseño de ambas mejoras.
@@ -36,5 +36,4 @@ Ver `docs/HaloPlus_Guia_de_Construccion.docx`, secciones 4 a 6, para el detalle 
 
 ## Licencia
 
-Este repositorio construye sobre proyectos de código abierto de terceros (ver enlaces arriba). El código propio de este equipo (`firmware/haptic/`, `api/hazards.js`, `sql/`) se distribuye bajo los mismos términos que el proyecto base, salvo que el equipo indique lo contrario.
-ta bien esta prueba :V
+Este repositorio construye sobre proyectos de código abierto de terceros (ver enlaces arriba). El código propio de este equipo (`firmware/lib/haptic/`, `api/hazards.js`, `sql/`) se distribuye bajo los mismos términos que el proyecto base, salvo que el equipo indique lo contrario.

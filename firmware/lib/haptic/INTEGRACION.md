@@ -18,11 +18,10 @@ bool hapticsAvailable = false;
 void setup() {
     // ... codigo original (setup_microphone, visionAssistant.initialize(), etc.) ...
 
-    // GPIO0/GPIO3: unicos pines libres, ya que camera_pins.h usa casi todo el resto
-    // y gps_module.h usa 32/33. GPIO0 es pin de boot-strapping - riesgo aceptado,
-    // ver guia de construccion seccion 8.1. Si el boot se vuelve poco confiable,
-    // considerar un coprocesador aparte (ej. un ATtiny/segundo ESP32 mas simple).
-    hapticsAvailable = haptics.initialize(/*sda=*/0, /*scl=*/3);
+    // AI-Thinker ESP32-CAM: SDA = GPIO15, SCL = GPIO4 (sin tarjeta microSD).
+    // El boton de push-to-talk/SOS tambien va en este PCF8574 (entrada P3 a GND),
+    // porque en esta placa no quedan GPIO libres. Se lee con haptics.readPin(3).
+    hapticsAvailable = haptics.initialize(/*sda=*/15, /*scl=*/4);
 }
 
 void loop() {

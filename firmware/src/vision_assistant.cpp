@@ -203,7 +203,7 @@ void VisionAssistant::sendSetupMessage() {
     // const char* mediaResolution = "MEDIA_RESOLUTION_HIGH";
     const char* mediaResolution = "MEDIA_RESOLUTION_LOW";
     // String setupMsg = "{\"setup\":{\"model\":\"models/gemini-2.0-flash-live-001\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
-    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-2.5-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
+    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
     ws.sendTXT(setupMsg);
     Serial.println("Sent setup message");
 }

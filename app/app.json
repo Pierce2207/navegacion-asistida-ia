@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "sscs-2025-app",
+    "name": "Murdock",
     "slug": "sscs-2025-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -11,7 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "googleServicesFile": "./GoogleService-Info.plist",
-      "bundleIdentifier": "com.sscs2025.app"
+      "bundleIdentifier": "com.auraplus.app"
     },
     "android": {
       "adaptiveIcon": {
@@ -20,7 +20,7 @@
       },
       "edgeToEdgeEnabled": true,
       "googleServicesFile": "./google-services.json",
-      "package": "com.sscs2025.app"
+      "package": "com.auraplus.app"
     },
     "web": {
       "bundler": "metro",
@@ -55,6 +55,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "12b16b01-8407-4708-b950-bab6084729f1"
+      }
     }
   }
 }

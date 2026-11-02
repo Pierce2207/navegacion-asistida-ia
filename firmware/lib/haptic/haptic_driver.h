@@ -25,7 +25,11 @@ enum class HazardDirection {
 /**
  * Controla los 3 motores de vibracion (izquierda/centro/derecha) a traves
  * de un expansor de E/S PCF8574 en el bus I2C. Cada salida del PCF8574
- * maneja un transistor NPN que a su vez enciende un motor de moneda (ERM).
+ * maneja un transistor PNP (2N3906 / S8550) en el lado alto: salida en LOW
+ * = motor encendido. Con PNP los motores quedan apagados al encender, porque
+ * el PCF8574 arranca con todas sus salidas en alto. Emisor a 3.3V (mismo
+ * voltaje que el VCC del PCF8574), base con 470 ohm a la salida, colector al
+ * motor, y un diodo 1N4148 en antiparalelo con cada motor.
  *
  * Fuentes de activacion (ver firmware/haptic/INTEGRACION.md):
  *  - El intent 'obstacle_alert' que Gemini genera al analizar la camara.
@@ -51,6 +55,13 @@ public:
 
     // Apaga los 3 motores de inmediato.
     void allOff();
+
+    // Lee una entrada del PCF8574 (P3..P7). Las salidas que se dejan en alto
+    // funcionan como entradas con pull-up debil: un boton a GND lee false.
+    // Devuelve true (no presionado) si el expansor no esta disponible.
+    bool readPin(uint8_t pin);
+
+    bool isAvailable() const { return initialized; }
 
 private:
     uint8_t i2cAddr = PCF8574_ADDR;

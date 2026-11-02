@@ -34,3 +34,27 @@ Design & Prototyping:
 - Interactive design: p3d.in/jKlt1
 - Developed through five hardware iterations: from a breadboard prototype to a 3D-printed wearable model with a neck strap design
 - Improvements included a camera cover for privacy, better strap comfort, dedicated space for components and ports, and integrated battery housing
+
+## Conexiones para la AI-Thinker ESP32-CAM (OV3660)
+
+El firmware está configurado para la **AI-Thinker ESP32-CAM** (`board = esp32cam`).
+No usar tarjeta microSD: comparte los pines 2, 4, 12, 13, 14 y 15.
+
+| Módulo | Pin del módulo | ESP32-CAM |
+|---|---|---|
+| Mic INMP441 | SCK / WS / SD | GPIO 14 / 13 / 2 |
+| | L/R, GND / VDD | GND / 3.3V |
+| MAX98357A | BCLK / LRC / DIN | GPIO 12 / 13 / 2 (LRC y DIN compartidos con el mic) |
+| | VIN / GND | 5V / GND |
+| GPS (NEO-6M) | TX | GPIO 3 (U0R) — desconectar al flashear |
+| | RX | sin conectar |
+| PCF8574 (0x20) | SDA / SCL | GPIO 15 / GPIO 4 |
+| | VCC / GND | 3.3V (no 5V) / GND |
+| | P0 / P1 / P2 | motores izquierda / centro / derecha (vía PNP, activo en LOW) |
+| | P3 | botón push-to-talk/SOS a GND |
+| Monitor serie | — | GPIO 1 (U0T), 115200 baudios |
+
+Notas:
+- Alimentar con 5V / 2A por el pin 5V y poner un condensador de 470–1000 µF entre 5V y GND.
+- GPIO 12 debe estar en bajo al arrancar; si la placa no bootea, desconectar el BCLK del MAX y probar.
+- GPIO 4 también maneja el LED flash: puede parpadear tenue con el tráfico I2C.

@@ -19,10 +19,12 @@ struct GPSData {
 
 class GPSModule {
 private:
-    // GPS pins - based on ESP32 UART2 default pins but using 32/33
-    // Tutorial uses GPIO 16/17 for UART2, but we're using 32/33 to avoid conflicts
-    static const int GPS_RX_PIN = 32;  // Connect to GPS TX
-    static const int GPS_TX_PIN = 33;  // Connect to GPS RX
+    // GPS pins - AI-Thinker ESP32-CAM: solo quedan libres GPIO 1/3 (UART0).
+    // GPIO3 (U0R) recibe el NMEA del GPS; GPIO1 (U0T) sigue libre para el monitor serie.
+    // No hace falta enviar nada al GPS, asi que TX queda sin usar (-1).
+    // IMPORTANTE: desconectar el TX del GPS mientras se flashea la placa.
+    static const int GPS_RX_PIN = 3;   // Connect to GPS TX
+    static const int GPS_TX_PIN = -1;  // GPS RX sin conectar
     static const int GPS_BAUD_RATE = 9600;
     
     TinyGPSPlus gps;

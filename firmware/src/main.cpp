@@ -22,8 +22,10 @@ bool hapticsAvailable = false;
 GPSData last_hazard_check_gps;
 unsigned long last_hazard_check_time = 0;
 
-// Button Pin for Push-to-Talk and SOS
-const int BUTTON_PIN = 15;
+// Button for Push-to-Talk and SOS.
+// En la AI-Thinker ESP32-CAM no quedan GPIO libres, asi que el boton va
+// entre la entrada P3 del PCF8574 (el mismo expansor de los hapticos) y GND.
+const uint8_t BUTTON_PCF_PIN = 3;
 
 // Wake words (optimized for Deepgram's acoustic search - longer phrases work better)
 const char* WAKE_WORDS[] = {
@@ -749,13 +751,11 @@ void setup() {
     }
     Serial.println("Vision Assistant initialized successfully!");
 
-    // Initialize haptic feedback module (PCF8574 I2C expander + 3 vibration motors).
-    // GPIO0/GPIO3 are used because every other pin is taken by the camera or GPS
-    // (see camera_pins.h and gps_module.h) - GPIO0 is a boot-strapping pin, so this
-    // carries some risk if the PCF8574 pulls it low during boot. See firmware/haptic
-    // /INTEGRACION.md and the construction guide (section 8.1) for wiring details, and
-    // consider a separate coprocessor if boot becomes unreliable.
-    hapticsAvailable = haptics.initialize(/*sda=*/0, /*scl=*/3);
+    // Initialize haptic feedback module (PCF8574 I2C expander + 3 vibration motors
+    // + push button on P3). AI-Thinker ESP32-CAM: GPIO15 = SDA, GPIO4 = SCL
+    // (GPIO4 tambien maneja el LED flash, que puede parpadear tenue con el I2C).
+    // Requiere NO usar tarjeta microSD, que comparte estos pines.
+    hapticsAvailable = haptics.initialize(/*sda=*/15, /*scl=*/4);
     if (!hapticsAvailable) {
         Serial.println("Warning: Haptic driver not found on I2C bus - continuing without haptic feedback");
     } else {
@@ -831,9 +831,12 @@ void setup() {
     // Set the tool callback
     visionAssistant.setToolCallback(toolHandler);
     
-    // Set up button pin
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
-    Serial.println("Button pin initialized.");
+    // Button lives on the PCF8574 (P3) - no pinMode needed, it is read over I2C
+    if (hapticsAvailable) {
+        Serial.println("Button ready on PCF8574 P3.");
+    } else {
+        Serial.println("Warning: PCF8574 not found - push button disabled (wake word still works).");
+    }
     
     // Play a ding sound to indicate setup is complete
     Serial.println("✅ Setup complete! Playing notification sound...");
@@ -1262,6 +1265,12 @@ void processRecordedCommand() {
     }
 }
 
+// Reads the push button from the PCF8574 (LOW = pressed). Returns HIGH if the
+// expander is missing, so the button logic just stays idle.
+static bool readButton() {
+    return haptics.readPin(BUTTON_PCF_PIN) ? HIGH : LOW;
+}
+
 void handleButton() {
     static bool last_button_state = HIGH;
     static bool button_held_down = false;
@@ -1269,12 +1278,12 @@ void handleButton() {
     static unsigned long last_press_time = 0;
     static unsigned long press_start_time = 0;
 
-    bool current_button_state = digitalRead(BUTTON_PIN);
+    bool current_button_state = readButton();
 
     // Button pressed
     if (current_button_state == LOW && last_button_state == HIGH) {
         delay(50); // Debounce
-        if (digitalRead(BUTTON_PIN) == LOW) {
+        if (readButton() == LOW) {
             press_start_time = millis();
             button_held_down = true;
 

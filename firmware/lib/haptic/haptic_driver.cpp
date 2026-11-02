@@ -61,6 +61,13 @@ void HapticDriver::update() {
     }
 }
 
+bool HapticDriver::readPin(uint8_t pin) {
+    if (!initialized || pin > 7) return true;
+    if (Wire.requestFrom((int)i2cAddr, 1) != 1) return true;
+    uint8_t value = Wire.read();
+    return (value >> pin) & 0x01;
+}
+
 void HapticDriver::allOff() {
     outputState = 0xFF;
     writeState();
