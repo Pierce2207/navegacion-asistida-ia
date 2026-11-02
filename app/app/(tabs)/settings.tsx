@@ -50,6 +50,8 @@ type Option<T> = { label: string; value: T };
 
 const LANGUAGE_OPTIONS: Option<string>[] = [
   { label: 'English (US)', value: 'en-US' },
+  // Plain 'es' (not es-PE/es-ES): it's what Deepgram STT expects as its language param
+  { label: 'Español', value: 'es' },
   { label: 'Chinese (Simplified)', value: 'zh-CN' },
 ];
 

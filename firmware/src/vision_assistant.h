@@ -38,7 +38,22 @@ private:
     int queueHead;
     int queueTail;
     int queueSize;
-    
+
+    // User's language from the app settings; Gemini writes spoken messages in it
+    String responseLanguage;
+
+    // When a frame carried a user voice command, hold further frames until Gemini answers:
+    // each frame is a complete turn, and a new turn interrupts the reply to the previous one
+    volatile unsigned long awaitingCommandReplySince = 0;  // 0 = not waiting
+    // Normally the reply takes ~1.5 s. After a *spoken* command (transcription + ding + mic restart
+    // all happening at once) the reply sometimes doesn't come until the next frame is sent, so
+    // don't hold frames for long: sending the next one releases it.
+    static const unsigned long COMMAND_REPLY_TIMEOUT = 3000;
+
+    // Set by the audio task while it downloads/plays speech: frame uploads (~35KB every 2 s)
+    // share the WiFi link and slowed the speech download to a crawl
+    volatile bool framesPaused = false;
+
     // Frame processing constants
     static const unsigned long FRAME_INTERVAL = 2000; // 2 seconds between frames (faster for user commands)
     static const unsigned long GPS_UPDATE_INTERVAL = 1000; // 1 second between GPS updates
@@ -55,7 +70,15 @@ public:
     // Callback management
     void setResponseCallback(ResponseCallback callback);
     void setToolCallback(ToolCallback callback);
-    
+
+    // Must be set before the WebSocket connects (it goes into the setup message)
+    void setResponseLanguage(const String& language);
+
+    // A user command is queued or sent and Gemini hasn't answered it yet
+    bool isAwaitingCommandReply() const { return awaitingCommandReplySince != 0 || queueSize > 0; }
+
+    void setFramesPaused(bool paused) { framesPaused = paused; }
+
     // Frame processing
     void processFrame();
     bool isSetupComplete() const;

@@ -5,6 +5,10 @@
 
 const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000&model=aura-asteria-en";
 
+// Defined further down (shared with the Google Translate TTS path)
+static bool decodeMp3ToPcm(const uint8_t* mp3Data, size_t mp3Size, int16_t** pcmOut, size_t* samplesOut, int* sampleRateOut);
+static int16_t* resamplePcmLinear(const int16_t* in, size_t inSamples, int inRate, int outRate, size_t* outSamplesOut);
+
 TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US"), is_cancellation_requested(false) {
 }
 
@@ -59,12 +63,8 @@ bool TTS::speakText(const String& text, const String& language) {
         return false;
     }
     
-    // Request I2S access for speaker
-    if (!requestSpeakerAccess()) {
-        Serial.println("❌ Cannot speak: I2S is busy with another device");
-        return false;
-    }
-    
+    // Speaker I2S access is requested after the download: its DMA buffers come out of the same
+    // internal heap the TLS connection needs, and holding both at once made TLS fail
     Serial.printf("TTS: Speaking text: %s (language: %s)\n", text.c_str(), language.c_str());
     
     // Download entire audio into memory before playing
@@ -101,7 +101,13 @@ bool TTS::speakText(const String& text, const String& language) {
     
     unsigned long downloadTime = millis() - startTime;
     Serial.printf("🎵 Audio ready! Size: %u bytes, Download time: %lu ms\n", dataSize, downloadTime);
-    
+
+    if (!requestSpeakerAccess()) {
+        Serial.println("❌ Cannot speak: I2S is busy with another device");
+        cleanupAudioData(audioData);
+        return false;
+    }
+
     // Play the downloaded audio
     Serial.println("▶️ Starting audio playback...");
     unsigned long playbackStartTime = millis();
@@ -173,8 +179,8 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
     String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000";
     
     // Add model based on language
-    if (localLanguage == "es" || localLanguage == "spanish") {
-        deepgramUrl += "&model=aura-asteria-es";
+    if (localLanguage.startsWith("es") || localLanguage == "spanish") {
+        deepgramUrl += "&model=aura-2-celeste-es";  // aura-asteria-es no longer exists (HTTP 400)
     } else if (localLanguage == "fr" || localLanguage == "french") {
         deepgramUrl += "&model=aura-asteria-fr";
     } else if (localLanguage == "de" || localLanguage == "german") {
@@ -195,6 +201,7 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
     http.addHeader("Accept-Encoding", "identity");  // Disable compression to reduce CPU load
     http.setTimeout(60000);  // 1 minute timeout (max for uint16_t)
     http.setReuse(false);  // Don't reuse connections to avoid potential issues
+    http.useHTTP10(true);  // Avoid chunked encoding in the raw stream (see callDeepgramAPI)
 
     int httpCode = http.POST(jsonPayload);
     Serial.printf("Deepgram TTS HTTP Response Code: %d\n", httpCode);
@@ -279,7 +286,9 @@ bool TTS::streamDeepgramAPI(const String& text, const String& language) {
             
             // Calculate approximate playback duration and wait
             unsigned long estimatedDurationMs = (bytesWrittenToI2S * 1000) / (SAMPLE_RATE * 2);  // 16-bit samples
-            unsigned long waitTime = estimatedDurationMs * 3;  // Multiply by 3 to prevent static
+            // Only the DMA ring can still be playing once i2s_write() returns (see playAudioData)
+            const unsigned long dmaRingMs = (8UL * 1024UL * 1000UL) / SAMPLE_RATE;
+            unsigned long waitTime = min(estimatedDurationMs, dmaRingMs) + 50;
             
             Serial.printf("Waiting %lu ms for audio playback to complete...\n", waitTime);
             delay(waitTime);
@@ -400,13 +409,15 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
         Serial.println("❌ WiFi not connected - cannot proceed with TTS request");
         return false;
     }
-    
+
     // Build URL with language parameter - use local copies
-    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=linear16&sample_rate=16000";
+    // MP3 at 32 kbps is ~5x smaller than 16 kHz PCM (19.7KB vs 94.7KB for one sentence). The
+    // download shares WiFi with the camera frame uploads and ran at ~8KB/s, so PCM took ~18s.
+    String deepgramUrl = "https://api.deepgram.com/v1/speak?encoding=mp3&bitrate=32000";
     
     // Add model based on language
-    if (localLanguage == "es" || localLanguage == "spanish") {
-        deepgramUrl += "&model=aura-asteria-es";
+    if (localLanguage.startsWith("es") || localLanguage == "spanish") {
+        deepgramUrl += "&model=aura-2-celeste-es";  // aura-asteria-es no longer exists (HTTP 400)
     } else if (localLanguage == "fr" || localLanguage == "french") {
         deepgramUrl += "&model=aura-asteria-fr";
     } else if (localLanguage == "de" || localLanguage == "german") {
@@ -436,6 +447,9 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
     http.addHeader("Connection", "close");  // Close connection after request to free resources
     http.setTimeout(60000);  // 1 minute timeout (max for uint16_t)
     http.setReuse(false);  // Don't reuse connections to avoid potential issues
+    // Over HTTP/1.1 Deepgram replies with chunked encoding, and since we read the raw stream
+    // the chunk-size lines end up inside the PCM, shifting samples and garbling the voice
+    http.useHTTP10(true);
 
     int httpCode = http.POST(jsonPayload);
     Serial.printf("Deepgram TTS HTTP Response Code: %d\n", httpCode);
@@ -577,6 +591,35 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
         Serial.printf("✅ Download complete! %u bytes in %lu ms (avg: %.1f %s)\n", 
                      totalRead, totalDownloadTime, displayAvgSpeed, avgSpeedUnit.c_str());
 
+        // The response is MP3 (see the URL): decode it and bring it to the 16 kHz the I2S
+        // pipeline plays at (Deepgram's MP3 comes out at 22.05/24 kHz)
+        int16_t* pcm = nullptr;
+        size_t pcmSamples = 0;
+        int mp3Rate = 0;
+        if (totalRead > 0 && decodeMp3ToPcm(*audioData, totalRead, &pcm, &pcmSamples, &mp3Rate)) {
+            free(*audioData);
+            *audioData = nullptr;
+            if (mp3Rate != SAMPLE_RATE) {
+                size_t resampledCount = 0;
+                int16_t* resampled = resamplePcmLinear(pcm, pcmSamples, mp3Rate, SAMPLE_RATE, &resampledCount);
+                free(pcm);
+                pcm = resampled;
+                pcmSamples = resampledCount;
+            }
+            if (pcm != nullptr) {
+                Serial.printf("🎵 Decoded MP3 (%d Hz) to %u samples of 16 kHz PCM\n", mp3Rate, pcmSamples);
+                *audioData = (uint8_t*)pcm;
+                totalRead = pcmSamples * sizeof(int16_t);
+            } else {
+                totalRead = 0;
+            }
+        } else {
+            Serial.println("❌ Failed to decode MP3 from Deepgram");
+            free(*audioData);
+            *audioData = nullptr;
+            totalRead = 0;
+        }
+
         *dataSize = totalRead;
         success = (totalRead > 0);
     } else {
@@ -600,7 +643,7 @@ bool TTS::hasDeepgramVoice(const String& language) {
     lang.toLowerCase();
     return lang.isEmpty() ||
            lang == "en" || lang == "en-us" || lang == "english" ||
-           lang == "es" || lang == "spanish" ||
+           lang.startsWith("es") || lang == "spanish" ||
            lang == "fr" || lang == "french" ||
            lang == "de" || lang == "german" ||
            lang == "pt" || lang == "portuguese" ||
@@ -1449,7 +1492,10 @@ bool TTS::playAudioData(const uint8_t* audioData, size_t dataSize) {
         
         // Calculate playback duration and wait for completion
         unsigned long estimatedDurationMs = (totalWritten * 1000) / (SAMPLE_RATE * 2);  // 16-bit samples
-        unsigned long waitTime = estimatedDurationMs * 3;  // Multiply by 3 to prevent static
+        // i2s_write() blocks until everything is queued, so only the DMA ring (8 x 1024 samples,
+        // 512 ms) can still be playing. Waiting 3x the whole clip added ~9 s after a 3 s sentence.
+        const unsigned long dmaRingMs = (8UL * 1024UL * 1000UL) / SAMPLE_RATE;
+        unsigned long waitTime = min(estimatedDurationMs, dmaRingMs) + 50;
         
         Serial.printf("Waiting %lu ms for audio playback to complete...\n", waitTime);
         delay(waitTime);

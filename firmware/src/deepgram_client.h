@@ -31,7 +31,7 @@ private:
     static const size_t RESPONSE_BUFFER_SIZE = 2048;
     
     // Helper function to create WAV data from raw PCM
-    uint8_t* createWAVData(const uint8_t* pcm_data, size_t pcm_size, size_t* wav_size);
+    uint8_t* createWAVData(const uint8_t* pcm_data, size_t pcm_size, size_t* wav_size, uint32_t sample_rate = 16000);
     
     // Helper function to extract transcript from Deepgram response
     String extractTranscript(const String& response);

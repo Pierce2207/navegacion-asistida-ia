@@ -23,16 +23,24 @@ bool VisionAssistant::initialize() {
     Serial.begin(115200);
     Serial.println("Initializing Vision Assistant...");
 
-    // Initialize camera
-    if (!initializeCamera()) {
-        Serial.println("Failed to initialize camera");
-        return false;
+    // Camera and GPS only on the first attempt: setup() retries this whole function
+    // until WiFi connects, and re-running esp_camera_init fails with ESP_ERR_INVALID_STATE.
+    static bool cameraReady = false;
+    if (!cameraReady) {
+        if (!initializeCamera()) {
+            Serial.println("Failed to initialize camera");
+            return false;
+        }
+        cameraReady = true;
     }
 
-    // Initialize GPS
-    if (!initializeGPS()) {
-        Serial.println("Warning: Failed to initialize GPS - continuing without GPS");
-        // Don't return false here, GPS is optional
+    static bool gpsAttempted = false;
+    if (!gpsAttempted) {
+        gpsAttempted = true;
+        if (!initializeGPS()) {
+            Serial.println("Warning: Failed to initialize GPS - continuing without GPS");
+            // Don't return false here, GPS is optional
+        }
     }
 
     // Connect to WiFi
@@ -66,6 +74,18 @@ void VisionAssistant::run() {
         lastGPSUpdate = currentTime;
     }
 
+    if (framesPaused) {
+        return;  // speech is being downloaded/played
+    }
+
+    if (awaitingCommandReplySince != 0) {
+        if (currentTime - awaitingCommandReplySince < COMMAND_REPLY_TIMEOUT) {
+            return;  // still waiting for the answer to the user's question
+        }
+        Serial.println("No reply to user command within timeout, resuming frames");
+        awaitingCommandReplySince = 0;
+    }
+
     // Check if it's time to process a new frame
     if (currentTime - lastFrameTime >= FRAME_INTERVAL) {
         processFrame();
@@ -79,6 +99,10 @@ void VisionAssistant::setResponseCallback(ResponseCallback callback) {
 
 void VisionAssistant::setToolCallback(ToolCallback callback) {
     toolCallback = callback;
+}
+
+void VisionAssistant::setResponseLanguage(const String& language) {
+    responseLanguage = language;
 }
 
 void VisionAssistant::processFrame() {
@@ -132,7 +156,11 @@ void VisionAssistant::processFrame() {
     if (hasQueuedCommands()) {
         String userCommand = getNextQueuedCommand();
         Serial.printf("Including queued user command: %s\n", userCommand.c_str());
-        msg += "{\"text\":\"USER VOICE COMMAND: " + userCommand + "\"},";
+        awaitingCommandReplySince = millis();
+        // Restating the rule next to the command: the system prompt alone wasn't enough, and the
+        // model kept answering direct questions with a silent 'log' about the camera view
+        msg += "{\"text\":\"USER VOICE COMMAND (the user is asking you directly: answer out loud with "
+               "intent=voice_query and shouldSpeak=true, even if the view is dark or blocked): " + userCommand + "\"},";
     }
     
     // Add image data
@@ -152,6 +180,19 @@ bool VisionAssistant::isSetupComplete() const {
 }
 
 bool VisionAssistant::connectToWiFi() {
+    // Log the router's disconnect reason: "status 6" alone doesn't say whether it was the password
+    static bool reasonLoggerAdded = false;
+    if (!reasonLoggerAdded) {
+        reasonLoggerAdded = true;
+        WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+            uint8_t reason = info.wifi_sta_disconnected.reason;
+            Serial.printf("\nWiFi disconnected, reason %u%s\n", reason,
+                          (reason == 2 || reason == 15 || reason == 202 || reason == 204)
+                              ? " (authentication failed - WIFI_PASSWORD is probably wrong)" : "");
+        }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    }
+
+    WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Connecting to WiFi");
 
@@ -163,7 +204,21 @@ bool VisionAssistant::connectToWiFi() {
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nFailed to connect to WiFi");
+        wl_status_t status = WiFi.status();
+        Serial.printf("\nFailed to connect to WiFi (status %d", status);
+        if (status == WL_NO_SSID_AVAIL) Serial.print(": network not found - check WIFI_SSID, and that it is 2.4 GHz");
+        else if (status == WL_CONNECT_FAILED) Serial.print(": connection rejected - check WIFI_PASSWORD");
+        Serial.println(")");
+
+        // List visible networks so a wrong or 5 GHz SSID is obvious from the serial log
+        WiFi.disconnect();
+        int n = WiFi.scanNetworks();
+        Serial.printf("Visible 2.4 GHz networks (%d):\n", n);
+        for (int i = 0; i < n; i++) {
+            Serial.printf("  %s (%d dBm)%s\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+                          WiFi.SSID(i) == WIFI_SSID ? "  <- configured" : "");
+        }
+        WiFi.scanDelete();
         return false;
     }
 
@@ -203,7 +258,22 @@ void VisionAssistant::sendSetupMessage() {
     // const char* mediaResolution = "MEDIA_RESOLUTION_HIGH";
     const char* mediaResolution = "MEDIA_RESOLUTION_LOW";
     // String setupMsg = "{\"setup\":{\"model\":\"models/gemini-2.0-flash-live-001\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
-    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"TEXT\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + String(SYSTEM_PROMPT) + "\"}]}}}";
+    // Current Live models reject TEXT ("response modalities (TEXT) is not supported"), so we ask
+    // for AUDIO. The system prompt forces every reply to be a systemAction tool call, so in
+    // practice no audio comes back and replies are still spoken through Deepgram TTS.
+    // The prompt is a multi-line raw string, so it must be JSON-escaped before embedding.
+    String prompt = String(SYSTEM_PROMPT);
+    prompt.replace("\\", "\\\\");
+    prompt.replace("\"", "\\\"");
+    prompt.replace("\r", "");
+    prompt.replace("\n", "\\n");
+    prompt.replace("\t", "\\t");
+    // The examples in the prompt are in English; without this, spoken messages stay in English
+    if (responseLanguage.startsWith("es")) {
+        prompt += "\\n\\nLANGUAGE: The user speaks Spanish. Write every 'message' value in Spanish "
+                  "(keep intent names and other field values in English). User voice commands arrive in Spanish.";
+    }
+    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"AUDIO\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + prompt + "\"}]}}}";
     ws.sendTXT(setupMsg);
     Serial.println("Sent setup message");
 }
@@ -270,6 +340,9 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
         } else {
             Serial.println("No function calls found in toolCall");
         }
+        // Gemini answered; frames can flow again. Cleared only after the callbacks so any reply to
+        // speak is already queued (the audio task checks both before starting a wake word search).
+        awaitingCommandReplySince = 0;
         return;
     }
 
@@ -306,7 +379,8 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
             break;
 
         case WStype_CONNECTED: {
-            Serial.printf("[WSc] Connected to url: %s\n", (char *)payload);
+            // The URL carries the API key as a query param, so don't log it
+            Serial.println("[WSc] Connected to Gemini Live");
             instance->setupComplete = false;
             instance->systemPromptSent = false;
             instance->sendSetupMessage();
@@ -333,6 +407,12 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
 
         case WStype_BIN: {
             Serial.printf("[WSc] Received binary data: %zu bytes\n", length);
+            if (length < 200) {
+                // Short control messages (turnComplete, generationComplete...) are useful when debugging timing
+                Serial.print("[WSc]   ");
+                Serial.write(payload, length);
+                Serial.println();
+            }
             JsonDocument doc;
             auto error = deserializeJson(doc, payload, length);
             if (error) {

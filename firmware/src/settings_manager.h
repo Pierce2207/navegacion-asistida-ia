@@ -7,9 +7,10 @@
 
 struct UserSettings {
     String language;
+    int volume;  // 0-100, from the app's volume slider
     bool isValid;
 
-    UserSettings() : language("en-US"), isValid(false) {}
+    UserSettings() : language("en-US"), volume(50), isValid(false) {}
 };
 
 class SettingsManager {

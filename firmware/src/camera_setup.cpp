@@ -27,7 +27,9 @@ void setupCamera() {
     config.grab_mode    = CAMERA_GRAB_LATEST;
 
     if (psramFound()) {
-        config.frame_size = FRAMESIZE_VGA;
+        // QVGA, not VGA: Gemini is set to MEDIA_RESOLUTION_LOW and downscales anyway, and VGA
+        // frames (~35KB every 2 s) were half of what saturated the uplink
+        config.frame_size = FRAMESIZE_QVGA;
         config.jpeg_quality = 12;
         config.fb_count = 2;
         config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -43,5 +45,9 @@ void setupCamera() {
         return;
     }
     sensor_t * s = esp_camera_sensor_get();
-    s->set_vflip(s, 1);
+    // On the AI-Thinker board the OV3660 comes out upside down; the OV2640 doesn't
+    if (s->id.PID == OV3660_PID) {
+        s->set_vflip(s, 1);
+    }
+    Serial.printf("Camera OK (sensor PID 0x%04x)\n", s->id.PID);
 }

@@ -41,6 +41,7 @@ bool SettingsManager::fetchSettings() {
             // Extract language setting
             if (doc.containsKey("language")) {
                 currentSettings.language = doc["language"].as<String>();
+                currentSettings.volume = doc["volume"] | 50;
                 currentSettings.isValid = true;
                 lastFetchTime = millis();
                 

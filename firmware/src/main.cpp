@@ -66,6 +66,12 @@ SemaphoreHandle_t audioMutex;
 QueueHandle_t commandQueue;
 QueueHandle_t audioCommandQueue; // For sending commands to the audio task
 
+// Wake word search runs in its own task: the Deepgram request takes seconds, and doing it inline
+// in the audio task stopped mic reads for that whole time (~20% of audio was being captured)
+TaskHandle_t WakeSearchTaskHandle = NULL;
+volatile bool wakeSearchBusy = false;  // stt_temp_buffer is in use by the search task
+volatile bool wakeSearchHit = false;   // result of the last finished search, consumed by audioTask
+
 // Enum for audio task commands
 enum class AudioCommandType {
     SPEAK_TEXT,
@@ -88,6 +94,7 @@ struct CommandMessage {
 
 // Function declarations
 void audioTask(void *pvParameters);
+void wakeSearchTask(void *pvParameters);
 void process_audio();
 void playDingSound();
 void playButtonDingSound();
@@ -368,7 +375,7 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     http.addHeader("Content-Type", "application/json");
     
     Serial.println("📡 Sending emergency notification to API...");
-    Serial.printf("URL: %s\n", String(NOTIFICATIONS_API_URL) + "/notifications");
+    Serial.printf("URL: %s/notifications\n", NOTIFICATIONS_API_URL);
     Serial.printf("JSON: %s\n", jsonString.c_str());
     
     int httpResponseCode = http.POST(jsonString);
@@ -594,15 +601,19 @@ void calculateBaselineAudioLevel() {
         return;
     }
     
-    // Calculate RMS of the first 0.5 seconds of recording for baseline
+    // Calculate RMS of the first 0.5 seconds of recording for baseline, skipping the first 200 ms:
+    // the mic is re-initialized after the ding and the INMP441 outputs full-scale garbage while it
+    // wakes up. Including it gave a baseline of ~32000, so everything looked "silent" and every
+    // command was cut off after ~2 seconds.
+    const int skip_samples = 3200; // 200 ms at 16 kHz
     int total_samples = command_buffer_index / 2; // Total number of 16-bit samples available
-    int samples_to_analyze = min(total_samples, 8000); // 0.5 seconds max, but not more than available
-    
+    int samples_to_analyze = min(total_samples - skip_samples, 8000 - skip_samples);
+
     if (samples_to_analyze <= 0) {
-        return; // Safety check
+        return; // Not enough audio past the startup transient yet; retried on the next loop
     }
-    
-    int16_t* samples = (int16_t*)command_buffer;
+
+    int16_t* samples = (int16_t*)command_buffer + skip_samples;
     
     float sum_squares = 0.0f;
     for (int i = 0; i < samples_to_analyze; i++) {
@@ -668,9 +679,13 @@ void initializeLanguageSettings() {
         // Set language for both STT and TTS
         deepgramClient.setDefaultLanguage(language);
         tts.setDefaultLanguage(language);
-        
+        visionAssistant.setResponseLanguage(language);
+
         Serial.printf("🎤 Deepgram STT language set to: %s\n", language.c_str());
         Serial.printf("🔊 Deepgram TTS language set to: %s\n", language.c_str());
+
+        // App volume 0-100 -> TTS software gain 0.0-2.0 (50 = unchanged)
+        tts.setVolume(settings.volume / 100.0f);
     } else {
         Serial.println("⚠️ Failed to fetch language settings, using defaults");
     }
@@ -765,6 +780,14 @@ void setup() {
     // Initialize language settings after WiFi is connected
     initializeLanguageSettings();
     
+    // Wake word search task on Core 1 so it never competes with mic reads on Core 0.
+    // 8KB like the audio task that used to run this search: every KB of stack comes out of the
+    // internal heap that the TLS connections (Gemini WS + Deepgram) need.
+    xTaskCreatePinnedToCore(wakeSearchTask, "WakeSearch", 8192, NULL, 1, &WakeSearchTaskHandle, 1);
+    if (WakeSearchTaskHandle == NULL) {
+        Serial.println("CRITICAL: Failed to create wake word search task!");
+    }
+
     // Start audio task on Core 0 (microphone will be initialized there)
     Serial.println("Starting audio task on Core 0...");
     xTaskCreatePinnedToCore(
@@ -845,7 +868,17 @@ void setup() {
     if (xQueueSend(audioCommandQueue, &setupCompleteDingCmd, 0) != pdTRUE) {
         Serial.println("❌ Failed to queue setup complete ding command");
     }
-    
+
+    // Spoken confirmation: a blind user can't see a status LED, so say the device is ready
+    AudioCommand readyCmd;
+    readyCmd.type = AudioCommandType::SPEAK_TEXT;
+    String readyText = settingsManager.getLanguage().startsWith("es") ? "Listo." : "Ready.";
+    strncpy(readyCmd.text, readyText.c_str(), sizeof(readyCmd.text) - 1);
+    readyCmd.text[sizeof(readyCmd.text) - 1] = '\0';
+    if (xQueueSend(audioCommandQueue, &readyCmd, 0) != pdTRUE) {
+        Serial.println("❌ Failed to queue ready announcement");
+    }
+
     Serial.printf("Vision Assistant setup complete on core %d - starting main loop\n", xPortGetCoreID());
 }
 
@@ -942,6 +975,21 @@ void process_audio() {
 }
 
 // Audio processing task running on Core 0
+void wakeSearchTask(void *pvParameters) {
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // Use Deepgram's search API for wake word detection instead of transcription
+        Serial.println("🔍 Searching for wake words using Deepgram search API...");
+        bool hit = deepgramClient.searchForWakeWords(stt_temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.60f);
+        if (hit) {
+            Serial.println("✅ Wake word detected via search API!");
+        }
+        // A hit that lands while a command is already being recorded is stale
+        wakeSearchHit = hit && !is_recording;
+        wakeSearchBusy = false;
+    }
+}
+
 void audioTask(void *pvParameters) {
     Serial.println("Audio task started on Core 0");
     
@@ -959,6 +1007,14 @@ void audioTask(void *pvParameters) {
     while (true) {
         // Check for commands from the main core
         AudioCommand receivedCmd;
+        // Speech and wake word search must not overlap: each opens a TLS connection (~40KB heap),
+        // and running both at once exhausted the heap and broke WiFi/DNS. Wait for an in-flight
+        // search before taking a command (same delay as when the search ran inline).
+        if (wakeSearchBusy && uxQueueMessagesWaiting(audioCommandQueue) > 0) {
+            while (wakeSearchBusy) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+        }
         if (xQueueReceive(audioCommandQueue, &receivedCmd, 0) == pdTRUE) {
             bool micWasActive = is_microphone_active();
             if (micWasActive) {
@@ -967,7 +1023,9 @@ void audioTask(void *pvParameters) {
 
             if (receivedCmd.type == AudioCommandType::SPEAK_TEXT) {
                 Serial.printf("🎤 Audio task received SPEAK_TEXT: \"%s\"\n", receivedCmd.text);
+                visionAssistant.setFramesPaused(true);  // leave the WiFi link to the speech download
                 tts.speakText(String(receivedCmd.text));
+                visionAssistant.setFramesPaused(false);
                 is_speaking = false; // Reset flag after speaking is done
             } else if (receivedCmd.type == AudioCommandType::PLAY_DING) {
                 Serial.println("🎤 Audio task received PLAY_DING");
@@ -1053,6 +1111,10 @@ void audioTask(void *pvParameters) {
                 Serial.println("STT temp buffer not allocated");
                 continue;
             }
+            // The search task is still reading stt_temp_buffer; keep recording and check back later
+            if (wakeSearchBusy) {
+                continue;
+            }
             uint8_t* temp_buffer = stt_temp_buffer;
             
             int current_index;
@@ -1109,18 +1171,22 @@ void audioTask(void *pvParameters) {
                 }
             }
 
-            bool wakeWordDetected = false;
-            if (hasRealAudio) {
-                // Use Deepgram's search API for wake word detection instead of transcription
-                Serial.println("🔍 Searching for wake words using Deepgram search API...");
-                // TODO INCREASE CONFIDENCE
-                wakeWordDetected = deepgramClient.searchForWakeWords(stt_temp_buffer, WAKE_WORD_BUFFER_SIZE, WAKE_WORDS, WAKE_WORDS_COUNT, 0.60f);
-                
-                if (wakeWordDetected) {
-                    Serial.println("✅ Wake word detected via search API!");
+            // Result of the search that just finished (it ran on the previous snapshot)
+            bool wakeWordDetected = wakeSearchHit;
+            wakeSearchHit = false;
+
+            if (!wakeWordDetected) {
+                if (uxQueueMessagesWaiting(audioCommandQueue) > 0) {
+                    // Something is about to be spoken; let it go first (see the wait above)
+                } else if (visionAssistant.isAwaitingCommandReply()) {
+                    // The user just asked something; a search now would only delay speaking the answer
+                } else if (hasRealAudio) {
+                    // Hand the fresh snapshot to the search task; the mic keeps recording meanwhile
+                    wakeSearchBusy = true;
+                    xTaskNotifyGive(WakeSearchTaskHandle);
+                } else {
+                    Serial.println("No real audio detected in buffer, skipping wake word search");
                 }
-            } else {
-                Serial.println("No real audio detected in buffer, skipping wake word search");
             }
 
             if (wakeWordDetected) {
@@ -1222,7 +1288,18 @@ void audioTask(void *pvParameters) {
 
 void processRecordedCommand() {
     is_recording = false;
-    
+
+    // The wake word buffer kept filling while the command was recorded. Drop it, or the next
+    // search runs over the command's own words and can fire again (we saw 'aldo' -> 'halo').
+    if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+        wake_word_buffer_index = 0;
+        wake_word_buffer_has_wrapped = false;
+        if (wake_word_buffer) {
+            memset(wake_word_buffer, 0, WAKE_WORD_BUFFER_SIZE);
+        }
+        xSemaphoreGive(audioMutex);
+    }
+
     // Play a ding sound to indicate the command was transcribed
     AudioCommand buttonDingCmd;
     buttonDingCmd.type = AudioCommandType::PLAY_BUTTON_DING;
@@ -1479,6 +1556,17 @@ void loop() {
     // Handle button presses for push-to-talk and SOS
     handleButton();
 
+#ifdef TEST_COMMAND_AFTER_MS
+    // Test-only build flag: inject one voice command so the Gemini round trip can be timed without
+    // speaking (serial input can't be used: UART0 RX, GPIO3, is taken by the GPS)
+    static bool testCommandSent = false;
+    if (!testCommandSent && millis() > TEST_COMMAND_AFTER_MS) {
+        testCommandSent = true;
+        Serial.println("🧪 Injecting test command");
+        visionAssistant.queueUserCommand("Dime qué ves.");
+    }
+#endif
+
     // Run the vision assistant (handles WebSocket communication, GPS updates, and frame processing)
     visionAssistant.run();
 
@@ -1509,6 +1597,9 @@ void loop() {
         } else {
             Serial.println("GPS Status: No fix obtained");
         }
+        // TLS connections need ~40KB of contiguous internal heap each; watch it shrink here
+        Serial.printf("Heap: free %u, min ever %u, largest block %u\n",
+                      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
         lastGPSStatus = millis();
     }
     
