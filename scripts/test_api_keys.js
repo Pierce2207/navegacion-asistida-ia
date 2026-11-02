@@ -58,7 +58,17 @@ async function testGemini(apiKey) {
 async function checkLiveModel(apiKey) {
   console.log("\n=== Revisando si el modelo Live del firmware sigue vigente ===");
   if (!apiKey) return;
-  const firmwareModel = "gemini-2.5-flash-live-preview";
+  // Se lee del firmware para no desincronizarse cuando se cambie el modelo.
+  const visionSrc = fs.readFileSync(
+    path.join(__dirname, "..", "firmware", "src", "vision_assistant.cpp"),
+    "utf8"
+  );
+  const modelMatch = visionSrc.match(/^\s*String setupMsg = .*?models\/([\w.-]+)/m);
+  if (!modelMatch) {
+    console.log("No se pudo leer el modelo de firmware/src/vision_assistant.cpp");
+    return;
+  }
+  const firmwareModel = modelMatch[1];
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=200`
