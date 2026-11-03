@@ -54,6 +54,20 @@ private:
     // share the WiFi link and slowed the speech download to a crawl
     volatile bool framesPaused = false;
 
+    // The user's last command, kept until Gemini answers it. Unlike awaitingCommandReplySince
+    // (which only holds frames for a few seconds) this stays set until the reply or a timeout, so
+    // wake word searches don't load the link meanwhile, and the command can be resent if the
+    // connection is restarted.
+    String pendingCommand;
+    volatile unsigned long commandPendingSince = 0;  // 0 = none
+    static const unsigned long COMMAND_PENDING_TIMEOUT = 20000;
+
+    // Last time anything arrived from Gemini. After a spoken command the TLS link sometimes stalls
+    // for ~14 s (looks like TCP retransmission backoff) while frames keep going out unanswered;
+    // a fresh connection is faster than waiting it out.
+    unsigned long lastServerMessageAt = 0;
+    static const unsigned long STALL_TIMEOUT = 6000;
+
     // Frame processing constants
     static const unsigned long FRAME_INTERVAL = 2000; // 2 seconds between frames (faster for user commands)
     static const unsigned long GPS_UPDATE_INTERVAL = 1000; // 1 second between GPS updates
@@ -75,7 +89,7 @@ public:
     void setResponseLanguage(const String& language);
 
     // A user command is queued or sent and Gemini hasn't answered it yet
-    bool isAwaitingCommandReply() const { return awaitingCommandReplySince != 0 || queueSize > 0; }
+    bool isAwaitingCommandReply() const { return commandPendingSince != 0 || queueSize > 0; }
 
     void setFramesPaused(bool paused) { framesPaused = paused; }
 

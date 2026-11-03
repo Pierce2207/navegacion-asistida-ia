@@ -29,7 +29,9 @@ const uint8_t BUTTON_PCF_PIN = 3;
 
 // Wake words (optimized for Deepgram's acoustic search - longer phrases work better)
 const char* WAKE_WORDS[] = {
-    "halo",
+    // "vision" (no accent, plain ASCII for the URL) matches spoken Spanish "visión" with 1.0 confidence
+    // in Deepgram's es search. "halo" was often heard as "aló"/"hello" and fired on unrelated words.
+    "vision",
 };
 const int WAKE_WORDS_COUNT = sizeof(WAKE_WORDS) / sizeof(WAKE_WORDS[0]);
 
@@ -54,6 +56,10 @@ volatile bool wake_word_buffer_has_wrapped = false;  // Track if wake word buffe
 volatile uint32_t buffer_sequence = 0;    // Sequence number to track buffer updates
 volatile float baseline_audio_level = 0.0f; // Baseline audio level for silence detection
 volatile bool baseline_calculated = false;  // Whether baseline has been calculated
+// End-of-command detection state, reset by calculateBaselineAudioLevel() at the start of each recording
+float noise_floor = 0.0f;       // quietest 300 ms window seen in this recording (AC RMS)
+bool speech_detected = false;   // the user has started talking
+int silent_windows = 0;         // consecutive quiet 200 ms checks after speech
 volatile bool is_speaking = false; // Flag to prevent TTS overlap
 
 // GPS and Places API
@@ -103,7 +109,7 @@ void sendEmergencyAlert(const String& alertType, const String& description);
 void handleSystemAction(const JsonDocument& doc);
 void initializeLanguageSettings();
 void calculateBaselineAudioLevel();
-bool isAudioSilent();
+float recentCommandLevel();
 void processRecordedCommand();
 void handleButton();
 void checkAndAnnounceNearbyPlaces();
@@ -596,15 +602,42 @@ String cleanTextForWakeWord(const String& text) {
     return cleaned;
 }
 
+// RMS with the mean removed. The INMP441 sits a few thousand counts off zero, so plain RMS is
+// dominated by that offset and barely changes when someone speaks.
+static float acRms(const int16_t* samples, int count) {
+    if (count <= 0) {
+        return 0.0f;
+    }
+    float mean = 0.0f;
+    for (int i = 0; i < count; i++) {
+        mean += samples[i];
+    }
+    mean /= count;
+    float sum_squares = 0.0f;
+    for (int i = 0; i < count; i++) {
+        float d = samples[i] - mean;
+        sum_squares += d * d;
+    }
+    return sqrt(sum_squares / count);
+}
+
+// Level of the last 300 ms of the command recording (call with audioMutex held)
+float recentCommandLevel() {
+    int total_samples = command_buffer_index / 2;
+    int window = min(4800, total_samples); // 300 ms at 16 kHz
+    if (!command_buffer || window <= 0) {
+        return 0.0f;
+    }
+    return acRms((int16_t*)command_buffer + (total_samples - window), window);
+}
+
 void calculateBaselineAudioLevel() {
     if (!command_buffer || command_buffer_index < 1600) { // Need at least 0.1 seconds of audio
         return;
     }
     
-    // Calculate RMS of the first 0.5 seconds of recording for baseline, skipping the first 200 ms:
-    // the mic is re-initialized after the ding and the INMP441 outputs full-scale garbage while it
-    // wakes up. Including it gave a baseline of ~32000, so everything looked "silent" and every
-    // command was cut off after ~2 seconds.
+    // Level of the first 0.5 seconds of recording, skipping the first 200 ms: the mic is
+    // re-initialized after the ding and the INMP441 outputs full-scale garbage while it wakes up.
     const int skip_samples = 3200; // 200 ms at 16 kHz
     int total_samples = command_buffer_index / 2; // Total number of 16-bit samples available
     int samples_to_analyze = min(total_samples - skip_samples, 8000 - skip_samples);
@@ -613,52 +646,16 @@ void calculateBaselineAudioLevel() {
         return; // Not enough audio past the startup transient yet; retried on the next loop
     }
 
-    int16_t* samples = (int16_t*)command_buffer + skip_samples;
-    
-    float sum_squares = 0.0f;
-    for (int i = 0; i < samples_to_analyze; i++) {
-        float sample = (float)samples[i];
-        sum_squares += sample * sample;
-    }
-    
-    baseline_audio_level = sqrt(sum_squares / samples_to_analyze);
+    baseline_audio_level = acRms((int16_t*)command_buffer + skip_samples, samples_to_analyze);
     baseline_calculated = true;
+
+    // Start of a new recording: the noise floor only goes down from here (the user may already be
+    // talking during this first window, so it isn't trusted as "silence" on its own)
+    noise_floor = baseline_audio_level;
+    speech_detected = false;
+    silent_windows = 0;
     
     Serial.printf("📊 Baseline audio level calculated: %.2f (from %d samples)\n", baseline_audio_level, samples_to_analyze);
-}
-
-bool isAudioSilent() {
-    if (!baseline_calculated || !command_buffer || command_buffer_index < 16000) { // Need at least 1 second of audio (16000 bytes)
-        return false;
-    }
-    
-    // Check the last 1 second of audio for silence - ensure we don't go out of bounds
-    int total_samples = command_buffer_index / 2; // Total number of 16-bit samples
-    int samples_to_check = min(16000, total_samples); // 1 second max, but not more than available
-    int start_index = max(0, total_samples - samples_to_check); // Start from a safe position
-    
-    if (start_index >= total_samples || samples_to_check <= 0) {
-        return false; // Safety check
-    }
-    
-    int16_t* samples = (int16_t*)command_buffer;
-    
-    float sum_squares = 0.0f;
-    for (int i = start_index; i < start_index + samples_to_check && i < total_samples; i++) {
-        float sample = (float)samples[i];
-        sum_squares += sample * sample;
-    }
-    
-    float current_level = sqrt(sum_squares / samples_to_check);
-    
-    // Consider it silent if current level is less than 1.2x baseline + small threshold (made more sensitive)
-    float silence_threshold = baseline_audio_level * 1.2f + 50.0f;
-    
-    Serial.printf("🔇 Silence check: current=%.2f, baseline=%.2f, threshold=%.2f, silent=%s\n", 
-                 current_level, baseline_audio_level, silence_threshold, 
-                 (current_level < silence_threshold) ? "YES" : "NO");
-    
-    return current_level < silence_threshold;
 }
 
 void initializeLanguageSettings() {
@@ -1207,7 +1204,7 @@ void audioTask(void *pvParameters) {
                 
                 is_recording = true;
                 recording_start_time = millis();
-                Serial.println("Recording command (max 15 seconds)...");
+                Serial.println("Recording command (max 8 seconds)...");
                 
                 if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
                     command_buffer_index = 0; // Clear command buffer to start recording new audio
@@ -1234,48 +1231,59 @@ void audioTask(void *pvParameters) {
                 }
             }
 
-            // Check for silence after baseline is calculated and at least 3 seconds have passed
+            // End-of-command detection. Wait for the user to start talking, then stop after ~1 s of
+            // quiet. The old check compared against a baseline taken right after the ding (often the
+            // user's own voice) and stopped at 3 s regardless, so most commands came back empty.
             bool shouldStopForSilence = false;
-            if (baseline_calculated && millis() - recording_start_time > 3000) { // Wait 3 seconds before checking silence
-                static unsigned long lastSilenceCheck = 0;
-                static int consecutiveSilentChecks = 0; // Track consecutive silent readings
-                const int requiredSilentChecks = 3; // Need 3 consecutive checks (0.6 seconds total)
-                
-                if (millis() - lastSilenceCheck > 200) { // Check every 200ms
-                    if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
-                        // Safety check: ensure command buffer index is within bounds
-                        if (command_buffer_index > COMMAND_BUFFER_SIZE) {
-                            Serial.printf("❌ CRITICAL: Command buffer overflow detected: %d > %d\n", 
-                                        command_buffer_index, COMMAND_BUFFER_SIZE);
-                            command_buffer_index = COMMAND_BUFFER_SIZE; // Cap it to prevent corruption
-                        }
-                        
-                        bool currentlySilent = isAudioSilent();
-                        if (currentlySilent) {
-                            consecutiveSilentChecks++;
-                            Serial.printf("🔇 Silent check %d/%d\n", consecutiveSilentChecks, requiredSilentChecks);
-                        } else {
-                            consecutiveSilentChecks = 0; // Reset counter if not silent
-                        }
-                        
-                        // Only stop if we've had enough consecutive silent checks
-                        shouldStopForSilence = (consecutiveSilentChecks >= requiredSilentChecks);
-                        
-                        xSemaphoreGive(audioMutex);
+            static unsigned long lastSilenceCheck = 0;
+            if (baseline_calculated && millis() - lastSilenceCheck > 200) { // Check every 200ms
+                lastSilenceCheck = millis();
+                float level = 0.0f;
+                if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+                    // Safety check: ensure command buffer index is within bounds
+                    if (command_buffer_index > COMMAND_BUFFER_SIZE) {
+                        Serial.printf("❌ CRITICAL: Command buffer overflow detected: %d > %d\n",
+                                    command_buffer_index, COMMAND_BUFFER_SIZE);
+                        command_buffer_index = COMMAND_BUFFER_SIZE; // Cap it to prevent corruption
                     }
-                    lastSilenceCheck = millis();
-                    if (shouldStopForSilence) {
-                        Serial.println("🔇 Sustained silence detected - stopping recording");
+                    level = recentCommandLevel();
+                    xSemaphoreGive(audioMutex);
+                }
+
+                // Noise floor = quietest window seen so far in this recording
+                if (level > 1.0f && level < noise_floor) {
+                    noise_floor = level;
+                }
+                float floorLevel = max(noise_floor, 20.0f);
+                if (level > floorLevel * 3.0f) {
+                    if (!speech_detected) {
+                        Serial.printf("🗣️ Speech started (level %.0f, floor %.0f)\n", level, floorLevel);
                     }
+                    speech_detected = true;
+                    silent_windows = 0;
+                } else if (level < floorLevel * 2.0f) {
+                    silent_windows++;
+                } else {
+                    silent_windows = 0;
+                }
+
+                unsigned long elapsed = millis() - recording_start_time;
+                if (speech_detected && silent_windows >= 7) {          // 1.4 s of quiet after speech (1 s cut "Dime... qué ves" at the pause)
+                    Serial.println("🔇 Sustained silence detected - stopping recording");
+                    shouldStopForSilence = true;
+                } else if (!speech_detected && elapsed > 6000) {      // nothing said at all
+                    Serial.println("🔇 No speech within 6 s - stopping recording");
+                    shouldStopForSilence = true;
                 }
             }
 
             // Stop recording if max time reached or silence detected
-            if (millis() - recording_start_time > 15000 || shouldStopForSilence) { // 15 seconds max or silence
+            // 8 s max: background TV/music can keep "speech" going, and commands are short anyway
+            if (millis() - recording_start_time > 8000 || shouldStopForSilence) {
                 if (shouldStopForSilence) {
                     Serial.println("Recording finished due to silence. Processing command...");
                 } else {
-                    Serial.println("Recording finished (15s max). Processing command...");
+                    Serial.println("Recording finished (8s max). Processing command...");
                 }
                 processRecordedCommand();
             }
@@ -1315,8 +1323,17 @@ void processRecordedCommand() {
                 int buffer_size = command_buffer_index;
                 xSemaphoreGive(audioMutex);
 
+                // Drop the first 200 ms: the mic restarts after the ding and outputs a full-scale burst
+                // that ended up at the start of every upload (~5% clipped samples)
+                const int skip_bytes = 3200 * 2;
+                const uint8_t* audio_start = temp_command_buffer;
+                if (buffer_size > skip_bytes * 2) {
+                    audio_start += skip_bytes;
+                    buffer_size -= skip_bytes;
+                }
+
                 Serial.printf("🎤 Processing %d bytes of command audio\n", buffer_size);
-                String command = deepgramClient.transcribe(temp_command_buffer, buffer_size);
+                String command = deepgramClient.transcribe(audio_start, buffer_size);
                 Serial.println("Command: " + command);
 
                 if (!command.isEmpty()) {
@@ -1559,10 +1576,11 @@ void loop() {
 #ifdef TEST_COMMAND_AFTER_MS
     // Test-only build flag: inject one voice command so the Gemini round trip can be timed without
     // speaking (serial input can't be used: UART0 RX, GPIO3, is taken by the GPS)
-    static bool testCommandSent = false;
-    if (!testCommandSent && millis() > TEST_COMMAND_AFTER_MS) {
-        testCommandSent = true;
-        Serial.println("🧪 Injecting test command");
+    // Injects 4 commands, 30 s apart, to also catch problems that only show up after a few rounds
+    static int testCommandsSent = 0;
+    if (testCommandsSent < 4 && millis() > TEST_COMMAND_AFTER_MS + testCommandsSent * 30000UL) {
+        testCommandsSent++;
+        Serial.printf("🧪 Injecting test command %d\n", testCommandsSent);
         visionAssistant.queueUserCommand("Dime qué ves.");
     }
 #endif
@@ -1597,9 +1615,11 @@ void loop() {
         } else {
             Serial.println("GPS Status: No fix obtained");
         }
-        // TLS connections need ~40KB of contiguous internal heap each; watch it shrink here
-        Serial.printf("Heap: free %u, min ever %u, largest block %u\n",
-                      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
+        // TLS connections need ~40KB of contiguous internal heap each; watch it shrink here.
+        // RSSI too: WiFi drops looked like memory errors until we checked the link itself.
+        Serial.printf("Heap: free %u, min ever %u, largest block %u | WiFi %s, RSSI %d dBm\n",
+                      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+                      WiFi.status() == WL_CONNECTED ? "connected" : "DOWN", WiFi.RSSI());
         lastGPSStatus = millis();
     }
     

@@ -74,6 +74,22 @@ void VisionAssistant::run() {
         lastGPSUpdate = currentTime;
     }
 
+    if (commandPendingSince != 0 && currentTime - commandPendingSince > COMMAND_PENDING_TIMEOUT) {
+        Serial.println("Gave up waiting for a reply to the user command");
+        commandPendingSince = 0;
+        pendingCommand = "";
+    }
+
+    // Frames have kept going out for STALL_TIMEOUT with nothing coming back: restart the link
+    if (setupComplete && lastServerMessageAt != 0 && lastFrameTime > lastServerMessageAt + STALL_TIMEOUT) {
+        Serial.printf("⚠️ Gemini link stalled (nothing received for %lu ms while sending frames) - reconnecting\n",
+                      currentTime - lastServerMessageAt);
+        setupComplete = false;
+        lastServerMessageAt = currentTime;  // don't re-trigger while the new connection comes up
+        ws.disconnect();                    // ws.loop() reconnects; the pending command is resent on setupComplete
+        return;
+    }
+
     if (framesPaused) {
         return;  // speech is being downloaded/played
     }
@@ -157,6 +173,8 @@ void VisionAssistant::processFrame() {
         String userCommand = getNextQueuedCommand();
         Serial.printf("Including queued user command: %s\n", userCommand.c_str());
         awaitingCommandReplySince = millis();
+        commandPendingSince = millis();
+        pendingCommand = userCommand;
         // Restating the rule next to the command: the system prompt alone wasn't enough, and the
         // model kept answering direct questions with a silent 'log' about the camera view
         msg += "{\"text\":\"USER VOICE COMMAND (the user is asking you directly: answer out loud with "
@@ -186,9 +204,13 @@ bool VisionAssistant::connectToWiFi() {
         reasonLoggerAdded = true;
         WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
             uint8_t reason = info.wifi_sta_disconnected.reason;
-            Serial.printf("\nWiFi disconnected, reason %u%s\n", reason,
-                          (reason == 2 || reason == 15 || reason == 202 || reason == 204)
-                              ? " (authentication failed - WIFI_PASSWORD is probably wrong)" : "");
+            // 15/202/204 = handshake/auth failure (wrong password); 201 = AP not found;
+            // 2/4 = auth/association expired (weak signal or the router dropped us, not the password)
+            const char* hint = "";
+            if (reason == 15 || reason == 202 || reason == 204) hint = " (authentication failed - WIFI_PASSWORD is probably wrong)";
+            else if (reason == 201) hint = " (network not found - out of range or router off)";
+            else if (reason == 2 || reason == 4) hint = " (connection expired - weak signal or router dropped us)";
+            Serial.printf("\nWiFi disconnected, reason %u%s\n", reason, hint);
         }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     }
 
@@ -225,6 +247,7 @@ bool VisionAssistant::connectToWiFi() {
     Serial.println("\nWiFi connected!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
+    Serial.printf("Signal: %d dBm (above -70 is fine; below -80 drops are likely)\n", WiFi.RSSI());
     return true;
 }
 
@@ -237,7 +260,7 @@ bool VisionAssistant::initializeWebSocket() {
     Serial.println("Initializing WebSocket...");
     ws.beginSSL(WS_HOST, WS_PORT, WS_PATH.c_str());
     ws.onEvent(webSocketEvent);
-    ws.setReconnectInterval(5000);
+    ws.setReconnectInterval(1500);  // short: we also force reconnects when the link stalls
     return true;
 }
 
@@ -307,6 +330,11 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
         Serial.println("Setup complete - ready to send frames");
         setupComplete = true;
         systemPromptSent = true;
+        // A new session doesn't know about a question asked on the previous (stalled) connection
+        if (commandPendingSince != 0 && pendingCommand.length() > 0 && queueSize == 0) {
+            Serial.printf("Resending pending user command: %s\n", pendingCommand.c_str());
+            queueUserCommand(pendingCommand);
+        }
         return;
     }
 
@@ -343,6 +371,8 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
         // Gemini answered; frames can flow again. Cleared only after the callbacks so any reply to
         // speak is already queued (the audio task checks both before starting a wake word search).
         awaitingCommandReplySince = 0;
+        commandPendingSince = 0;
+        pendingCommand = "";
         return;
     }
 
@@ -381,6 +411,7 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
         case WStype_CONNECTED: {
             // The URL carries the API key as a query param, so don't log it
             Serial.println("[WSc] Connected to Gemini Live");
+            instance->lastServerMessageAt = millis();
             instance->setupComplete = false;
             instance->systemPromptSent = false;
             instance->sendSetupMessage();
@@ -388,6 +419,7 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
         }
 
         case WStype_TEXT: {
+            instance->lastServerMessageAt = millis();
             Serial.printf("[WSc] Received text: %s\n", (char*)payload);
             JsonDocument doc;
             auto error = deserializeJson(doc, payload, length);
@@ -406,6 +438,7 @@ void VisionAssistant::webSocketEvent(WStype_t type, uint8_t *payload, size_t len
         }
 
         case WStype_BIN: {
+            instance->lastServerMessageAt = millis();
             Serial.printf("[WSc] Received binary data: %zu bytes\n", length);
             if (length < 200) {
                 // Short control messages (turnComplete, generationComplete...) are useful when debugging timing

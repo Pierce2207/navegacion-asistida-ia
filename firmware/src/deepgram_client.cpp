@@ -29,6 +29,24 @@ bool DeepgramClient::begin() {
     return true;
 }
 
+// 16 kHz -> 8 kHz by averaging each pair of samples. Uploads are the bottleneck on this board
+// (the camera frames and Deepgram requests share a slow uplink), and 8 kHz is enough for speech.
+// Returns a ps_malloc'd buffer (caller frees) or nullptr.
+static int16_t* downsampleTo8k(const uint8_t* pcm16k, size_t pcm_size, size_t* out_samples) {
+    size_t ds_samples = (pcm_size / 2) / 2;
+    int16_t* ds = (int16_t*)ps_malloc(ds_samples * sizeof(int16_t));
+    if (!ds) {
+        *out_samples = 0;
+        return nullptr;
+    }
+    const int16_t* in = (const int16_t*)pcm16k;
+    for (size_t i = 0; i < ds_samples; i++) {
+        ds[i] = (int16_t)(((int32_t)in[2 * i] + in[2 * i + 1]) / 2);
+    }
+    *out_samples = ds_samples;
+    return ds;
+}
+
 uint8_t* DeepgramClient::createWAVData(const uint8_t* pcm_data, size_t pcm_size, size_t* wav_size, uint32_t sample_rate) {
     // Calculate WAV file size
     size_t wav_data_size = sizeof(WAVHeader) + pcm_size;
@@ -189,9 +207,16 @@ String DeepgramClient::transcribe(const uint8_t* audio_data, size_t data_size, c
         return response;
     }
 
-    // Convert raw PCM to WAV format
+    // Convert raw PCM to WAV format, at 8 kHz to halve the upload (~5 s for a 3 s command at 16 kHz)
+    size_t ds_samples = 0;
+    int16_t* ds = downsampleTo8k(audio_data, data_size, &ds_samples);
+    if (!ds) {
+        Serial.println("Failed to allocate downsample buffer for transcription");
+        return response;
+    }
     size_t wav_size;
-    uint8_t* wav_data = createWAVData(audio_data, data_size, &wav_size);
+    uint8_t* wav_data = createWAVData((const uint8_t*)ds, ds_samples * sizeof(int16_t), &wav_size, 8000);
+    free(ds);
     if (!wav_data) {
         Serial.println("Failed to create WAV data");
         return response;
@@ -280,19 +305,14 @@ bool DeepgramClient::searchForWakeWords(const uint8_t* audio_data, size_t data_s
         return false;
     }
 
-    // Downsample 16 kHz -> 8 kHz (average each pair of samples) before uploading. A 3 s window is
-    // sent every few seconds, and at 16 kHz (96KB each) it plus the camera frames saturated the
-    // uplink: Gemini replies sat behind queued uploads for 10-20 s. 8 kHz is plenty for one word.
-    size_t in_samples = data_size / 2;
-    size_t ds_samples = in_samples / 2;
-    int16_t* ds = (int16_t*)ps_malloc(ds_samples * sizeof(int16_t));
+    // Downsample to 8 kHz before uploading. A 3 s window is sent every few seconds, and at 16 kHz
+    // (96KB each) it plus the camera frames saturated the uplink: Gemini replies sat behind queued
+    // uploads for 10-20 s.
+    size_t ds_samples = 0;
+    int16_t* ds = downsampleTo8k(audio_data, data_size, &ds_samples);
     if (!ds) {
         Serial.println("Failed to allocate downsample buffer for wake word search");
         return false;
-    }
-    const int16_t* in = (const int16_t*)audio_data;
-    for (size_t i = 0; i < ds_samples; i++) {
-        ds[i] = (int16_t)(((int32_t)in[2 * i] + in[2 * i + 1]) / 2);
     }
 
     // Convert raw PCM to WAV format
@@ -366,7 +386,8 @@ bool DeepgramClient::searchForWakeWords(const uint8_t* audio_data, size_t data_s
                 Serial.println("Error Response: " + error_response);
             }
         } else {
-            Serial.printf("❌ [HTTP] Wake word search failed, error: %s\n", http.errorToString(httpCode).c_str());
+            Serial.printf("❌ [HTTP] Wake word search failed, error: %s (heap free %u, largest block %u)\n",
+                          http.errorToString(httpCode).c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
         }
         http.end();
     } else {
