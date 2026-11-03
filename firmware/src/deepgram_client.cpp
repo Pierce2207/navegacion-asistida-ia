@@ -387,7 +387,8 @@ bool DeepgramClient::searchForWakeWords(const uint8_t* audio_data, size_t data_s
             }
         } else {
             Serial.printf("❌ [HTTP] Wake word search failed, error: %s (heap free %u, largest block %u)\n",
-                          http.errorToString(httpCode).c_str(), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+                          http.errorToString(httpCode).c_str(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         }
         http.end();
     } else {

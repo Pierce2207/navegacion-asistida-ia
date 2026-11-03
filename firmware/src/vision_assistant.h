@@ -91,7 +91,13 @@ public:
     // A user command is queued or sent and Gemini hasn't answered it yet
     bool isAwaitingCommandReply() const { return commandPendingSince != 0 || queueSize > 0; }
 
-    void setFramesPaused(bool paused) { framesPaused = paused; }
+    void setFramesPaused(bool paused) {
+        framesPaused = paused;
+        if (!paused) {
+            // No frames went out while paused, so the silence from Gemini meanwhile isn't a stall
+            lastServerMessageAt = millis();
+        }
+    }
 
     // Frame processing
     void processFrame();

@@ -722,6 +722,11 @@ void setup() {
         command_buffer = (uint8_t*)malloc(COMMAND_BUFFER_SIZE);
     } else {
         Serial.println("PSRAM found, using ps_malloc.");
+        // Send ordinary malloc() above 256 bytes (Strings, JSON docs, HTTP buffers...) to PSRAM.
+        // Left in internal RAM they fragmented it over a few minutes until no TLS connection could
+        // be opened ("SSL - Memory allocation failed" with ~110KB free). TLS, WiFi and DMA allocate
+        // internal memory explicitly, so they're unaffected and get the internal heap to themselves.
+        heap_caps_malloc_extmem_enable(256);
         wake_word_buffer = (uint8_t*)ps_malloc(WAKE_WORD_BUFFER_SIZE);
         command_buffer = (uint8_t*)ps_malloc(COMMAND_BUFFER_SIZE);
         stt_temp_buffer = (uint8_t*)ps_malloc(WAKE_WORD_BUFFER_SIZE);
@@ -1615,10 +1620,13 @@ void loop() {
         } else {
             Serial.println("GPS Status: No fix obtained");
         }
-        // TLS connections need ~40KB of contiguous internal heap each; watch it shrink here.
+        // TLS needs contiguous byte-addressable internal RAM; watch it here. (ESP.getMaxAllocHeap()
+        // reported a 32KB IRAM block TLS can't use, so it always read 32756 even when TLS failed.)
         // RSSI too: WiFi drops looked like memory errors until we checked the link itself.
-        Serial.printf("Heap: free %u, min ever %u, largest block %u | WiFi %s, RSSI %d dBm\n",
-                      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+        Serial.printf("Heap: internal free %u, largest usable block %u, min ever %u | PSRAM free %u | WiFi %s, RSSI %d dBm\n",
+                      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                      ESP.getMinFreeHeap(), ESP.getFreePsram(),
                       WiFi.status() == WL_CONNECTED ? "connected" : "DOWN", WiFi.RSSI());
         lastGPSStatus = millis();
     }
