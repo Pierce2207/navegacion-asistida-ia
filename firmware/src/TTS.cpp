@@ -564,6 +564,9 @@ bool TTS::callDeepgramAPI(const String& text, const String& language, uint8_t** 
                         lastProgressTime = currentTime;
                     }
                 }
+                // Let IDLE0 run: this task outranks it, and a long reply (download + MP3 decode
+                // > 5 s without blocking) tripped the task watchdog and rebooted the board
+                vTaskDelay(1);
             } else {
                 yield();
                 delay(10);
@@ -1032,8 +1035,13 @@ static bool decodeMp3ToPcm(const uint8_t* mp3Data, size_t mp3Size, int16_t** pcm
     unsigned char* readPtr = (unsigned char*)mp3Data;
     int bytesLeft = (int)mp3Size;
     bool failed = false;
+    int framesDecoded = 0;
 
     while (bytesLeft > 0) {
+        // Decoding a long reply takes seconds of CPU; yield so the task watchdog (IDLE) stays fed
+        if (++framesDecoded % 16 == 0) {
+            vTaskDelay(1);
+        }
         int syncOffset = MP3FindSyncWord(readPtr, bytesLeft);
         if (syncOffset < 0) {
             break;
@@ -1628,13 +1636,9 @@ void TTS::optimizeWiFiForSpeed() {
             Serial.printf("⚠️ Failed to set WiFi protocol: %s\n", esp_err_to_name(err));
         }
         
-        // Set maximum transmission power
-        err = esp_wifi_set_max_tx_power(WIFI_POWER_19_5dBm);
-        if (err == ESP_OK) {
-            Serial.println("✅ WiFi TX power set to maximum (19.5 dBm)");
-        } else {
-            Serial.printf("⚠️ Failed to set max TX power: %s\n", esp_err_to_name(err));
-        }
+        // TX power is deliberately NOT raised to the 19.5 dBm maximum here: on the ESP32-CAM the
+        // current spikes at full power dipped the supply and dropped the WiFi link (even at -40 dBm
+        // signal). connectToWiFi() sets a moderate level instead.
     } else {
         Serial.println("⚠️ Skipping advanced WiFi optimizations - not connected");
     }

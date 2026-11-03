@@ -45,10 +45,12 @@ private:
     // When a frame carried a user voice command, hold further frames until Gemini answers:
     // each frame is a complete turn, and a new turn interrupts the reply to the previous one
     volatile unsigned long awaitingCommandReplySince = 0;  // 0 = not waiting
-    // Normally the reply takes ~1.5 s. After a *spoken* command (transcription + ding + mic restart
-    // all happening at once) the reply sometimes doesn't come until the next frame is sent, so
-    // don't hold frames for long: sending the next one releases it.
-    static const unsigned long COMMAND_REPLY_TIMEOUT = 3000;
+    // Text commands (sent inside a frame turn): hold briefly, the next frame used to release a stuck
+    // reply. Audio commands: hold until the reply, since a new frame turn interrupts the answer
+    // being generated (seen as "interrupted": true and a 10 s delay); stalls are caught separately.
+    static const unsigned long TEXT_COMMAND_REPLY_TIMEOUT = 3000;
+    static const unsigned long VOICE_COMMAND_REPLY_TIMEOUT = 10000;
+    unsigned long commandReplyTimeout = TEXT_COMMAND_REPLY_TIMEOUT;
 
     // Set by the audio task while it downloads/plays speech: frame uploads (~35KB every 2 s)
     // share the WiFi link and slowed the speech download to a crawl
@@ -61,6 +63,24 @@ private:
     String pendingCommand;
     volatile unsigned long commandPendingSince = 0;  // 0 = none
     static const unsigned long COMMAND_PENDING_TIMEOUT = 20000;
+
+    // Spoken commands go to Gemini as audio (no Deepgram transcription: ~3-5 s saved). While one
+    // is being streamed, camera frames are held: each frame is a complete turn and would cut it.
+    volatile bool voiceCommandActive = false;
+    bool voiceCommandPending = false;     // audio command sent, no reply yet (resent after a reconnect)
+    volatile bool voiceResendRequested = false;
+    int voiceResends = 0;                 // a spoken command is resent at most once
+    // What Gemini transcribed from the spoken command. Gemini Live sometimes hears an audio turn
+    // (transcribes it) and then never answers it; resending the same words as a text command
+    // inside a frame turn gets an answer, faster than reconnecting.
+    String voiceHeardText;
+    static const unsigned long VOICE_TEXT_FALLBACK_AFTER = 4000;
+    // The voice turn is opened (activityStart) only once the last frame turn is answered: audio
+    // sent while Gemini was still on a frame got folded into that turn and never answered.
+    bool voiceTurnOpen = false;
+    bool frameTurnInFlight = false;
+    unsigned long frameTurnSentAt = 0;
+    static const unsigned long FRAME_TURN_WAIT = 4000;
 
     // Last time anything arrived from Gemini. After a spoken command the TLS link sometimes stalls
     // for ~14 s (looks like TCP retransmission backoff) while frames keep going out unanswered;
@@ -88,8 +108,23 @@ public:
     // Must be set before the WebSocket connects (it goes into the setup message)
     void setResponseLanguage(const String& language);
 
-    // A user command is queued or sent and Gemini hasn't answered it yet
-    bool isAwaitingCommandReply() const { return commandPendingSince != 0 || queueSize > 0; }
+    // A user command is queued, being spoken or sent, and Gemini hasn't answered it yet
+    bool isAwaitingCommandReply() const { return commandPendingSince != 0 || queueSize > 0 || voiceCommandActive; }
+
+    // Spoken command streamed as audio (call from the main loop only: the WebSocket isn't thread-safe).
+    // begin: holds frames, sends the current view and activityStart. send: 8 kHz 16-bit mono PCM.
+    // end: activityEnd; Gemini then answers with a systemAction like for a text command.
+    void beginVoiceCommand();
+    // Opens the voice turn as soon as Gemini is free; false while still waiting (keep the audio)
+    bool voiceTurnReady();
+    void sendVoiceAudio(const int16_t* pcm8k, size_t samples);
+    void endVoiceCommand();
+    // True once after a reconnect if an audio command was still unanswered (caller re-streams it)
+    bool takeVoiceResendRequest() {
+        bool r = voiceResendRequested;
+        voiceResendRequested = false;
+        return r;
+    }
 
     void setFramesPaused(bool paused) {
         framesPaused = paused;
@@ -131,6 +166,7 @@ private:
     bool initializeGPS();
     bool initializeWebSocket();
     void sendSetupMessage();
+    bool sendFrameRealtime();  // current camera view as realtimeInput video (for spoken commands)
     void sendToolResponse(const char* functionId, const char* functionName, const char* result);
     void handleWebSocketMessage(const JsonDocument& doc);
 };

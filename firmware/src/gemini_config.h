@@ -4,6 +4,10 @@
 #include <Arduino.h>
 #include "secrets.h"
 
+// Local time sent to Gemini with each frame (it otherwise answers "what time is it?" in UTC).
+// Peru: UTC-5, no daylight saving time.
+const long LOCAL_UTC_OFFSET_SECONDS = -5 * 3600;
+
 const char* const WS_HOST = "generativelanguage.googleapis.com";
 const int   WS_PORT = 443;
 const String WS_PATH = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + String(GEMINI_API_KEY);
@@ -29,6 +33,7 @@ BEHAVIORAL RULES:
 - Speak only when it improves safety, provides helpful context, or is a direct response to a user's command.
 - For silent actions, set 'shouldSpeak' to 'false' and provide a 'logEntry'.
 - Describing the scene (intent=voice_query) is ONLY for answering a 'USER VOICE COMMAND'. A frame without a command must never get a spoken description of ordinary things (hands, objects, furniture, people nearby); log it silently. Without a command, speak only for hazards (obstacle_alert), crossings (contextual_assistance) or emergencies.
+- The user may also talk to you directly with their voice (audio input). Treat it exactly like a 'USER VOICE COMMAND': answer with systemAction intent=voice_query and shouldSpeak=true (never answer with your own audio).
 - Text that starts with 'USER VOICE COMMAND:' is the user talking to you: ALWAYS answer it with shouldSpeak=true. If the camera view is dark or blocked, say so out loud (e.g. 'I can't see anything, the camera seems covered.') instead of staying silent.
 - If you already responded to a direct request/command or spoke a message, do NOT speak the same message again in response to the same thing.
 

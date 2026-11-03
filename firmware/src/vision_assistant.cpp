@@ -78,6 +78,7 @@ void VisionAssistant::run() {
         Serial.println("Gave up waiting for a reply to the user command");
         commandPendingSince = 0;
         pendingCommand = "";
+        voiceCommandPending = false;
     }
 
     // Frames have kept going out for STALL_TIMEOUT with nothing coming back: restart the link
@@ -90,12 +91,35 @@ void VisionAssistant::run() {
         return;
     }
 
-    if (framesPaused) {
-        return;  // speech is being downloaded/played
+    if (framesPaused || voiceCommandActive) {
+        return;  // speech is being downloaded/played, or the user is talking to Gemini
+    }
+
+    // Spoken command heard but unanswered: ask again in words (the next frame carries it)
+    if (voiceCommandPending && awaitingCommandReplySince != 0 && voiceHeardText.length() > 0 &&
+        currentTime - awaitingCommandReplySince > VOICE_TEXT_FALLBACK_AFTER) {
+        Serial.printf("No reply to the spoken command - resending it as text: %s\n", voiceHeardText.c_str());
+        voiceCommandPending = false;
+        awaitingCommandReplySince = 0;
+        queueUserCommand(voiceHeardText);
+        voiceHeardText = "";
     }
 
     if (awaitingCommandReplySince != 0) {
-        if (currentTime - awaitingCommandReplySince < COMMAND_REPLY_TIMEOUT) {
+        // Waiting with frames held, and Gemini has gone quiet: same stall, just not caught by the
+        // frame-based check below since no frames are going out
+        // Only for a spoken command that actually went out: with frames held and nothing sent,
+        // Gemini has no reason to talk, and this looped reconnect -> resend forever.
+        if (voiceCommandPending && currentTime - awaitingCommandReplySince > STALL_TIMEOUT &&
+            currentTime - lastServerMessageAt > STALL_TIMEOUT && setupComplete) {
+            Serial.println("⚠️ Gemini silent while waiting for a reply - reconnecting");
+            setupComplete = false;
+            lastServerMessageAt = currentTime;
+            awaitingCommandReplySince = 0;
+            ws.disconnect();
+            return;
+        }
+        if (currentTime - awaitingCommandReplySince < commandReplyTimeout) {
             return;  // still waiting for the answer to the user's question
         }
         Serial.println("No reply to user command within timeout, resuming frames");
@@ -119,6 +143,72 @@ void VisionAssistant::setToolCallback(ToolCallback callback) {
 
 void VisionAssistant::setResponseLanguage(const String& language) {
     responseLanguage = language;
+}
+
+bool VisionAssistant::sendFrameRealtime() {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        Serial.println("Camera capture failed");
+        return false;
+    }
+    String msg = "{\"realtimeInput\":{\"video\":{\"mimeType\":\"image/jpeg\",\"data\":\"" +
+                 base64_encode(fb->buf, fb->len) + "\"}}}";
+    esp_camera_fb_return(fb);
+    return ws.sendTXT(msg);
+}
+
+void VisionAssistant::beginVoiceCommand() {
+    if (!voiceCommandPending) {
+        voiceResends = 0;  // a new command (a resend keeps its count)
+    }
+    voiceHeardText = "";
+    voiceCommandActive = true;  // holds frames right away (see run())
+    voiceTurnOpen = false;
+}
+
+bool VisionAssistant::voiceTurnReady() {
+    if (voiceTurnOpen) {
+        return true;
+    }
+    if (!setupComplete) {
+        return false;  // reconnecting; the audio stays in the recording until the session is back
+    }
+    if (frameTurnInFlight && millis() - frameTurnSentAt < FRAME_TURN_WAIT) {
+        return false;  // Gemini is still answering the last frame
+    }
+    // Gemini needs the current view to answer "what do you see?"
+    sendFrameRealtime();
+    ws.sendTXT("{\"realtimeInput\":{\"activityStart\":{}}}");
+    voiceTurnOpen = true;
+    Serial.println("🎙️ Streaming spoken command to Gemini");
+    return true;
+}
+
+void VisionAssistant::sendVoiceAudio(const int16_t* pcm8k, size_t samples) {
+    if (!setupComplete || !voiceTurnOpen || samples == 0) {
+        return;
+    }
+    String msg = "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=8000\",\"data\":\"" +
+                 base64_encode((const uint8_t*)pcm8k, samples * sizeof(int16_t)) + "\"}}}";
+    ws.sendTXT(msg);
+}
+
+void VisionAssistant::endVoiceCommand() {
+    bool wasOpen = voiceTurnOpen;
+    if (setupComplete && voiceTurnOpen) {
+        ws.sendTXT("{\"realtimeInput\":{\"activityEnd\":{}}}");
+        Serial.println("🎙️ Spoken command sent, waiting for Gemini");
+    }
+    voiceTurnOpen = false;
+    voiceCommandActive = false;
+    if (!wasOpen) {
+        return;  // nothing reached Gemini; nothing to wait for
+    }
+    voiceCommandPending = true;
+    // Hold frames until the reply (a frame turn would interrupt it); no wake word searches meanwhile
+    awaitingCommandReplySince = millis();
+    commandReplyTimeout = VOICE_COMMAND_REPLY_TIMEOUT;
+    commandPendingSince = millis();
 }
 
 void VisionAssistant::processFrame() {
@@ -160,6 +250,14 @@ void VisionAssistant::processFrame() {
         Serial.println("GPS data not available or not recent");
     }
 
+    // Local time (NTP, see connectToWiFi); timeout 0 so a not-yet-synced clock just skips it
+    struct tm now;
+    if (getLocalTime(&now, 0)) {
+        char timeText[64];
+        strftime(timeText, sizeof(timeText), "Local time: %H:%M, %Y-%m-%d. ", &now);
+        gpsText += timeText;
+    }
+
     // Create message with both image and GPS context
     String msg = "{\"client_content\":{\"turn_complete\":true,\"turns\":[{\"role\":\"user\",\"parts\":[";
     
@@ -173,6 +271,7 @@ void VisionAssistant::processFrame() {
         String userCommand = getNextQueuedCommand();
         Serial.printf("Including queued user command: %s\n", userCommand.c_str());
         awaitingCommandReplySince = millis();
+        commandReplyTimeout = TEXT_COMMAND_REPLY_TIMEOUT;
         commandPendingSince = millis();
         pendingCommand = userCommand;
         // Restating the rule next to the command: the system prompt alone wasn't enough, and the
@@ -188,6 +287,9 @@ void VisionAssistant::processFrame() {
     bool sent = ws.sendTXT(msg);
     if (!sent) {
         Serial.println("Failed to send frame to Gemini");
+    } else {
+        frameTurnInFlight = true;
+        frameTurnSentAt = millis();
     }
 
     esp_camera_fb_return(fb);
@@ -216,6 +318,10 @@ bool VisionAssistant::connectToWiFi() {
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    // 13 dBm instead of the 19.5 dBm default/maximum: the full-power current spikes dipped the
+    // ESP32-CAM's supply and the link dropped right at the first TLS handshake, even with -40 dBm
+    // signal. 13 dBm is plenty for a nearby router or the user's phone hotspot.
+    WiFi.setTxPower(WIFI_POWER_13dBm);
     Serial.print("Connecting to WiFi");
 
     int attempts = 0;
@@ -248,6 +354,8 @@ bool VisionAssistant::connectToWiFi() {
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     Serial.printf("Signal: %d dBm (above -70 is fine; below -80 drops are likely)\n", WiFi.RSSI());
+    // Real clock for "what time is it?" (sent with each frame); syncs in the background
+    configTime(LOCAL_UTC_OFFSET_SECONDS, 0, "pool.ntp.org", "time.google.com");
     return true;
 }
 
@@ -296,7 +404,10 @@ void VisionAssistant::sendSetupMessage() {
         prompt += "\\n\\nLANGUAGE: The user speaks Spanish. Write every 'message' value in Spanish "
                   "(keep intent names and other field values in English). User voice commands arrive in Spanish.";
     }
-    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"AUDIO\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + prompt + "\"}]}}}";
+    // realtimeInputConfig: activity detection is ours (activityStart/End around a spoken command);
+    // Gemini's automatic one missed the end of speech 1 time in 3. inputAudioTranscription: lets us
+    // log what Gemini heard.
+    String setupMsg = "{\"setup\":{\"model\":\"models/gemini-3.1-flash-live-preview\",\"generationConfig\":{\"responseModalities\":[\"AUDIO\"], \"mediaResolution\":\"" + String(mediaResolution) + "\"},\"tools\":[" + String(TOOLS_JSON) + "],\"systemInstruction\":{\"parts\":[{\"text\":\"" + prompt + "\"}]},\"realtimeInputConfig\":{\"automaticActivityDetection\":{\"disabled\":true}},\"inputAudioTranscription\":{}}}";
     ws.sendTXT(setupMsg);
     Serial.println("Sent setup message");
 }
@@ -335,6 +446,18 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
             Serial.printf("Resending pending user command: %s\n", pendingCommand.c_str());
             queueUserCommand(pendingCommand);
         }
+        if (commandPendingSince != 0 && voiceCommandPending) {
+            if (voiceResends < 1) {
+                voiceResends++;
+                Serial.println("Resending pending spoken command");
+                voiceResendRequested = true;  // the main loop re-streams the recorded audio
+            } else {
+                Serial.println("Spoken command already resent once - dropping it");
+                voiceCommandPending = false;
+                commandPendingSince = 0;
+                awaitingCommandReplySince = 0;
+            }
+        }
         return;
     }
 
@@ -355,7 +478,16 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
                     JsonObjectConst args = funcCall["args"];
                     String argsJson;
                     serializeJson(args, argsJson);
-                    
+
+                    // A spoken command answered with a silent action means Gemini didn't catch it
+                    // (mumbled, too quiet, noise). Say so instead of leaving the user waiting.
+                    if (voiceCommandPending && !args["shouldSpeak"].as<bool>()) {
+                        Serial.println("Spoken command got a silent reply - asking the user to repeat");
+                        argsJson = responseLanguage.startsWith("es")
+                            ? "{\"intent\":\"voice_query\",\"shouldSpeak\":true,\"message\":\"No te entendí, ¿puedes repetir?\"}"
+                            : "{\"intent\":\"voice_query\",\"shouldSpeak\":true,\"message\":\"Sorry, I didn't catch that. Can you repeat?\"}";
+                    }
+
                     if (toolCallback) {
                         Serial.printf("Tool call: %s(%s)\n", toolName, argsJson.c_str());
                         toolCallback(toolName, argsJson);
@@ -373,7 +505,22 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
         awaitingCommandReplySince = 0;
         commandPendingSince = 0;
         pendingCommand = "";
+        voiceCommandPending = false;
         return;
+    }
+
+    // End of a turn: a waiting voice command can open its own turn now
+    if (doc["serverContent"]["turnComplete"].is<bool>() && doc["serverContent"]["turnComplete"].as<bool>()) {
+        frameTurnInFlight = false;
+    }
+
+    // What Gemini understood from a spoken command (replaces the old Deepgram "Command:" log)
+    if (doc["serverContent"]["inputTranscription"]["text"].is<const char*>()) {
+        Serial.printf("🗣️ Gemini heard: %s\n", doc["serverContent"]["inputTranscription"]["text"].as<const char*>());
+        if (voiceCommandActive || voiceCommandPending) {
+            // May arrive in pieces; kept for the text fallback in run()
+            voiceHeardText += doc["serverContent"]["inputTranscription"]["text"].as<const char*>();
+        }
     }
 
     // Handle model text response

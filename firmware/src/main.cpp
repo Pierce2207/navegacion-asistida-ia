@@ -78,6 +78,20 @@ TaskHandle_t WakeSearchTaskHandle = NULL;
 volatile bool wakeSearchBusy = false;  // stt_temp_buffer is in use by the search task
 volatile bool wakeSearchHit = false;   // result of the last finished search, consumed by audioTask
 
+// Spoken command streaming: the audio task records into command_buffer, and the main loop
+// (which owns the Gemini WebSocket) forwards it as 8 kHz audio while the user is still talking.
+volatile bool voice_stream_active = false;    // a command is being (or about to be) streamed
+volatile bool voice_stream_finished = false;  // recording ended; send the rest and activityEnd
+volatile int voice_stream_sent = 0;           // bytes of command_buffer already sent
+const int VOICE_STREAM_SKIP_BYTES = 3200 * 2; // first 200 ms: the mic's restart burst after the ding
+
+// Called by the audio task right after it resets command_buffer for a new recording
+void startVoiceStream() {
+    voice_stream_sent = VOICE_STREAM_SKIP_BYTES;
+    voice_stream_finished = false;
+    voice_stream_active = true;
+}
+
 // Enum for audio task commands
 enum class AudioCommandType {
     SPEAK_TEXT,
@@ -1054,6 +1068,7 @@ void audioTask(void *pvParameters) {
                     }
                     xSemaphoreGive(audioMutex);
                 }
+                startVoiceStream();
             } else if (receivedCmd.type == AudioCommandType::STOP_RECORDING_AND_PROCESS) {
                 Serial.println("🎤 Audio task received STOP_RECORDING_AND_PROCESS");
                 if (is_recording) {
@@ -1219,6 +1234,7 @@ void audioTask(void *pvParameters) {
                     }
                     xSemaphoreGive(audioMutex);
                 }
+                startVoiceStream();
             }
         }
 
@@ -1320,48 +1336,11 @@ void processRecordedCommand() {
         Serial.println("❌ Failed to queue PLAY_BUTTON_DING command");
     }
 
-    if (command_buffer && command_buffer_index > 8000) { // Need at least 0.5s of audio
-        uint8_t* temp_command_buffer = (uint8_t*)malloc(command_buffer_index);
-        if (temp_command_buffer && xSemaphoreTake(audioMutex, portMAX_DELAY)) {
-            if (command_buffer_index <= COMMAND_BUFFER_SIZE) {
-                memcpy(temp_command_buffer, command_buffer, command_buffer_index);
-                int buffer_size = command_buffer_index;
-                xSemaphoreGive(audioMutex);
-
-                // Drop the first 200 ms: the mic restarts after the ding and outputs a full-scale burst
-                // that ended up at the start of every upload (~5% clipped samples)
-                const int skip_bytes = 3200 * 2;
-                const uint8_t* audio_start = temp_command_buffer;
-                if (buffer_size > skip_bytes * 2) {
-                    audio_start += skip_bytes;
-                    buffer_size -= skip_bytes;
-                }
-
-                Serial.printf("🎤 Processing %d bytes of command audio\n", buffer_size);
-                String command = deepgramClient.transcribe(audio_start, buffer_size);
-                Serial.println("Command: " + command);
-
-                if (!command.isEmpty()) {
-                    CommandMessage cmdMsg;
-                    strncpy(cmdMsg.command, command.c_str(), sizeof(cmdMsg.command) - 1);
-                    cmdMsg.command[sizeof(cmdMsg.command) - 1] = '\0';
-                    if (xQueueSend(commandQueue, &cmdMsg, 0) != pdTRUE) {
-                        Serial.println("Failed to queue command");
-                    }
-                }
-                free(temp_command_buffer);
-            } else {
-                Serial.printf("❌ Command buffer index out of bounds: %d > %d\n", command_buffer_index, COMMAND_BUFFER_SIZE);
-                xSemaphoreGive(audioMutex);
-                free(temp_command_buffer);
-            }
-        } else {
-            Serial.println("Failed to allocate temp command buffer or get mutex");
-            if (temp_command_buffer) free(temp_command_buffer);
-        }
-    } else {
-        Serial.printf("Not enough audio data recorded: %d bytes\n", command_buffer_index);
-    }
+    // The audio already went to Gemini while the user spoke (pumpVoiceToGemini() in the main loop);
+    // telling it the command is complete is all that's left. This replaced the Deepgram
+    // transcription round trip (~3-5 s): Gemini understands the audio directly and answers in ~1 s.
+    Serial.printf("🎤 Command recorded: %d bytes\n", command_buffer_index);
+    voice_stream_finished = true;
 }
 
 // Reads the push button from the PCF8574 (LOW = pressed). Returns HIGH if the
@@ -1562,6 +1541,71 @@ String stripHtmlTags(const String& html) {
     return text;
 }
 
+// Forwards the command being recorded to Gemini as 8 kHz audio, every 200 ms while the user talks,
+// so the upload overlaps the speech instead of following it. Runs in the main loop because the
+// WebSocket isn't thread-safe.
+void pumpVoiceToGemini() {
+    static bool started = false;
+    static unsigned long lastPump = 0;
+
+    // After a reconnect, an unanswered spoken command is re-streamed from the recording
+    if (visionAssistant.takeVoiceResendRequest() && !voice_stream_active && !is_recording) {
+        voice_stream_sent = VOICE_STREAM_SKIP_BYTES;
+        voice_stream_finished = true;
+        voice_stream_active = true;
+    }
+
+    if (!voice_stream_active) {
+        return;
+    }
+    if (!started) {
+        visionAssistant.beginVoiceCommand();
+        started = true;
+    }
+    // Hold the audio (it keeps accumulating in command_buffer) until Gemini can take the voice turn
+    if (!visionAssistant.voiceTurnReady()) {
+        return;
+    }
+    if (!voice_stream_finished && millis() - lastPump < 200) {
+        return;
+    }
+    lastPump = millis();
+
+    // Send everything recorded since last time, a bounded chunk per call
+    const int MAX_CHUNK_BYTES = 16000;  // 0.5 s at 16 kHz
+    int recorded = 0;
+    int16_t* ds = nullptr;
+    size_t dsSamples = 0;
+    if (xSemaphoreTake(audioMutex, portMAX_DELAY)) {
+        recorded = command_buffer_index;
+        int from = voice_stream_sent;
+        int to = min(recorded, from + MAX_CHUNK_BYTES);
+        to -= (to - from) % 4;  // whole pairs of 16-bit samples
+        if (to > from) {
+            dsSamples = (to - from) / 4;
+            ds = (int16_t*)ps_malloc(dsSamples * sizeof(int16_t));
+            if (ds) {
+                const int16_t* in = (const int16_t*)(command_buffer + from);
+                for (size_t i = 0; i < dsSamples; i++) {
+                    ds[i] = (int16_t)(((int32_t)in[2 * i] + in[2 * i + 1]) / 2);  // 16 -> 8 kHz
+                }
+                voice_stream_sent = to;
+            }
+        }
+        xSemaphoreGive(audioMutex);
+    }
+    if (ds) {
+        visionAssistant.sendVoiceAudio(ds, dsSamples);
+        free(ds);
+    }
+
+    if (voice_stream_finished && voice_stream_sent + 4 > recorded) {
+        visionAssistant.endVoiceCommand();
+        voice_stream_active = false;
+        started = false;
+    }
+}
+
 void loop() {
     // Ensure we don't start processing until setup is complete
     static bool setup_done = false;
@@ -1579,6 +1623,9 @@ void loop() {
     handleButton();
 
 #ifdef TEST_COMMAND_AFTER_MS
+#ifndef TEST_COMMAND_TEXT
+#define TEST_COMMAND_TEXT "Dime qué ves."
+#endif
     // Test-only build flag: inject one voice command so the Gemini round trip can be timed without
     // speaking (serial input can't be used: UART0 RX, GPIO3, is taken by the GPS)
     // Injects 4 commands, 30 s apart, to also catch problems that only show up after a few rounds
@@ -1586,12 +1633,15 @@ void loop() {
     if (testCommandsSent < 4 && millis() > TEST_COMMAND_AFTER_MS + testCommandsSent * 30000UL) {
         testCommandsSent++;
         Serial.printf("🧪 Injecting test command %d\n", testCommandsSent);
-        visionAssistant.queueUserCommand("Dime qué ves.");
+        visionAssistant.queueUserCommand(TEST_COMMAND_TEXT);
     }
 #endif
 
     // Run the vision assistant (handles WebSocket communication, GPS updates, and frame processing)
     visionAssistant.run();
+
+    // Stream a spoken command to Gemini while it's being recorded
+    pumpVoiceToGemini();
 
     // Check for nearby places
     checkAndAnnounceNearbyPlaces();
