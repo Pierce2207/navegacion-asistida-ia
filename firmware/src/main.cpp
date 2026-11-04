@@ -428,7 +428,28 @@ void handleSystemAction(const JsonDocument& doc) {
         Serial.printf("Log Entry: %s\n", logEntry.c_str());
         Serial.printf("Route Params: %s\n", routeParams.c_str());
     }
-    
+
+    // Hazards vibrate first and always: speech takes 5-8 s to download and play, and is dropped
+    // below if something is already being said. The vibration used to come after speakText()
+    // returned, or not at all when TTS was busy.
+    if (intent == "obstacle_alert") {
+        Serial.println("⚠️ Obstacle alert detected!");
+        if (hapticsAvailable) {
+            String direction = doc["direction"].as<String>();
+            HazardDirection d = HazardDirection::UNKNOWN;
+            if (direction == "left") d = HazardDirection::LEFT;
+            else if (direction == "center") d = HazardDirection::CENTER;
+            else if (direction == "right") d = HazardDirection::RIGHT;
+            if (d != HazardDirection::UNKNOWN) {
+                haptics.triggerDirection(d);
+            } else {
+                Serial.println("⚠️ obstacle_alert had no valid direction - skipping haptic pulse");
+            }
+        }
+        // Obstacle alerts should always be spoken for safety
+        shouldSpeak = true;
+    }
+
     // Handle speaking if required
     if (shouldSpeak && !message.isEmpty()) {
         if (is_speaking) {
@@ -514,27 +535,9 @@ void handleSystemAction(const JsonDocument& doc) {
         sendEmergencyAlert(alertType, description);
     }
     else if (intent == "obstacle_alert") {
-        Serial.println("⚠️ Obstacle alert detected!");
-        // Log obstacle information
+        // Vibration and speech were handled at the top (vibrate first, speak via the audio queue)
         if (!logEntry.isEmpty()) {
             Serial.printf("OBSTACLE LOG: %s\n", logEntry.c_str());
-        }
-        // Obstacle alerts should always be spoken for safety
-        if (!message.isEmpty() && ttsAvailable) {
-            tts.speakText(message);
-        }
-        // Trigger directional haptic feedback so the alert doesn't rely on audio alone
-        if (hapticsAvailable) {
-            String direction = doc["direction"].as<String>();
-            HazardDirection d = HazardDirection::UNKNOWN;
-            if (direction == "left") d = HazardDirection::LEFT;
-            else if (direction == "center") d = HazardDirection::CENTER;
-            else if (direction == "right") d = HazardDirection::RIGHT;
-            if (d != HazardDirection::UNKNOWN) {
-                haptics.triggerDirection(d);
-            } else {
-                Serial.println("⚠️ obstacle_alert had no valid direction - skipping haptic pulse");
-            }
         }
     }
     else if (intent == "contextual_assistance") {
