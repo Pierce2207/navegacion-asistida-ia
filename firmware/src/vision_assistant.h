@@ -126,6 +126,14 @@ public:
         return r;
     }
 
+    // Drops the Gemini connection to free its TLS memory (~40KB) for something more urgent, like
+    // an SOS request; ws.loop() reconnects on its own afterwards
+    void dropConnectionForMemory() {
+        Serial.println("Dropping the Gemini connection to free memory for an urgent request");
+        setupComplete = false;
+        ws.disconnect();
+    }
+
     void setFramesPaused(bool paused) {
         framesPaused = paused;
         if (!paused) {

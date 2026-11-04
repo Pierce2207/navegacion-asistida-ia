@@ -17,6 +17,9 @@ SettingsManager settingsManager(NOTIFICATIONS_API_URL);
 HapticDriver haptics;
 bool ttsAvailable = false;
 bool hapticsAvailable = false;
+// The PCF8574 (motors + button) is now used from two tasks: the main loop and the button task
+SemaphoreHandle_t i2cMutex = NULL;
+volatile bool sos_requested = false;  // set by the button task, sent from the main loop
 
 // GPS state for the shared hazard network check (separate from the places-API tracker)
 GPSData last_hazard_check_gps;
@@ -77,6 +80,7 @@ QueueHandle_t audioCommandQueue; // For sending commands to the audio task
 TaskHandle_t WakeSearchTaskHandle = NULL;
 volatile bool wakeSearchBusy = false;  // stt_temp_buffer is in use by the search task
 volatile bool wakeSearchHit = false;   // result of the last finished search, consumed by audioTask
+volatile bool sos_in_progress = false; // no new wake word searches while an SOS is being sent
 
 // Spoken command streaming: the audio task records into command_buffer, and the main loop
 // (which owns the Gemini WebSocket) forwards it as 8 kHz audio while the user is still talking.
@@ -126,6 +130,8 @@ void calculateBaselineAudioLevel();
 float recentCommandLevel();
 void processRecordedCommand();
 void handleButton();
+void buttonTask(void *pvParameters);
+void hapticsDirection(HazardDirection d, uint16_t durationMs = 300);
 void checkAndAnnounceNearbyPlaces();
 void checkNearbyHazards();
 String stripHtmlTags(const String& html);
@@ -310,7 +316,17 @@ void playButtonDingSound() {
 
 // Helper function to format ISO timestamp
 String getISOTimestamp() {
-    // Base timestamp: 2025-08-02T00:00:00Z (epoch for today)
+    // Real UTC time once NTP has synced (configTime in connectToWiFi)
+    time_t now = time(nullptr);
+    if (now > 1700000000) {  // a 2023+ date means the clock is set
+        struct tm utc;
+        gmtime_r(&now, &utc);
+        char iso[32];
+        strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &utc);
+        return String(iso);
+    }
+
+    // Fallback before NTP sync: placeholder date + device uptime
     unsigned long currentMillis = millis();
     unsigned long totalSeconds = currentMillis / 1000;
     
@@ -382,34 +398,55 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     notificationDoc["timestamp"] = getISOTimestamp();
     notificationDoc["severity"] = getSeverityLevel(alertType);
     notificationDoc["location"] = locationObj;
-    notificationDoc["alert_type"] = alertType;
+    // The API only knows help/fall/sos/emergency (anything else is stored as "help")
+    notificationDoc["alert_type"] = (alertType == "panic_button") ? "sos" : alertType;
     notificationDoc["device_id"] = "esp32_camera";
     
     // Convert to string
     String jsonString;
     serializeJson(notificationDoc, jsonString);
     
-    // Send POST request to notifications API
-    HTTPClient http;
-    http.begin(String(NOTIFICATIONS_API_URL) + "/notifications");
-    http.addHeader("Content-Type", "application/json");
-    
     Serial.println("📡 Sending emergency notification to API...");
     Serial.printf("URL: %s/notifications\n", NOTIFICATIONS_API_URL);
     Serial.printf("JSON: %s\n", jsonString.c_str());
-    
-    int httpResponseCode = http.POST(jsonString);
-    
-    if (httpResponseCode > 0) {
-        String response = http.getString();
-        Serial.printf("✅ Emergency notification sent successfully! Response code: %d\n", httpResponseCode);
-        Serial.printf("Response: %s\n", response.c_str());
-    } else {
-        Serial.printf("❌ Failed to send emergency notification. Error code: %d\n", httpResponseCode);
-        Serial.printf("Error: %s\n", http.errorToString(httpResponseCode).c_str());
+
+    // An SOS needs its own TLS connection, and with Gemini's connection open plus a wake word
+    // search or a speech download in flight there wasn't memory for it ("SSL - Memory allocation
+    // failed", 3 out of 3 attempts). So: stop new searches, let the ones in flight finish, and if
+    // that's still not enough, drop the Gemini connection (it reconnects by itself).
+    sos_in_progress = true;
+    unsigned long waitStart = millis();
+    while ((wakeSearchBusy || is_speaking) && millis() - waitStart < 8000) {
+        delay(50);
     }
-    
-    http.end();
+
+    const int MAX_ATTEMPTS = 3;
+    for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        HTTPClient http;
+        http.begin(String(NOTIFICATIONS_API_URL) + "/notifications");
+        http.addHeader("Content-Type", "application/json");
+        int httpResponseCode = http.POST(jsonString);
+
+        if (httpResponseCode > 0) {
+            String response = http.getString();
+            Serial.printf("✅ Emergency notification sent successfully! Response code: %d\n", httpResponseCode);
+            Serial.printf("Response: %s\n", response.c_str());
+            http.end();
+            sos_in_progress = false;
+            return;
+        }
+        Serial.printf("❌ Emergency notification attempt %d/%d failed: %s (heap %u, largest block %u)\n",
+                      attempt, MAX_ATTEMPTS, http.errorToString(httpResponseCode).c_str(),
+                      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        http.end();
+        if (attempt == 1) {
+            visionAssistant.dropConnectionForMemory();
+        }
+        delay(1500);
+    }
+    Serial.println("❌ Could not send the emergency notification");
+    sos_in_progress = false;
 }
 
 void handleSystemAction(const JsonDocument& doc) {
@@ -441,7 +478,7 @@ void handleSystemAction(const JsonDocument& doc) {
             else if (direction == "center") d = HazardDirection::CENTER;
             else if (direction == "right") d = HazardDirection::RIGHT;
             if (d != HazardDirection::UNKNOWN) {
-                haptics.triggerDirection(d);
+                hapticsDirection(d);
             } else {
                 Serial.println("⚠️ obstacle_alert had no valid direction - skipping haptic pulse");
             }
@@ -789,6 +826,7 @@ void setup() {
     // + push button on P3). AI-Thinker ESP32-CAM: GPIO15 = SDA, GPIO4 = SCL
     // (GPIO4 tambien maneja el LED flash, que puede parpadear tenue con el I2C).
     // Requiere NO usar tarjeta microSD, que comparte estos pines.
+    i2cMutex = xSemaphoreCreateMutex();
     hapticsAvailable = haptics.initialize(/*sda=*/15, /*scl=*/4);
     if (!hapticsAvailable) {
         Serial.println("Warning: Haptic driver not found on I2C bus - continuing without haptic feedback");
@@ -875,6 +913,9 @@ void setup() {
     
     // Button lives on the PCF8574 (P3) - no pinMode needed, it is read over I2C
     if (hapticsAvailable) {
+        // Polled in its own task: the main loop can be busy for hundreds of ms (frame uploads)
+        // and quick SOS taps were being missed. Core 1, above the loop task's priority.
+        xTaskCreatePinnedToCore(buttonTask, "ButtonTask", 4096, NULL, 2, NULL, 1);
         Serial.println("Button ready on PCF8574 P3.");
     } else {
         Serial.println("Warning: PCF8574 not found - push button disabled (wake word still works).");
@@ -1198,6 +1239,8 @@ void audioTask(void *pvParameters) {
             if (!wakeWordDetected) {
                 if (uxQueueMessagesWaiting(audioCommandQueue) > 0) {
                     // Something is about to be spoken; let it go first (see the wait above)
+                } else if (sos_in_progress) {
+                    // The SOS request needs the TLS memory a search would take
                 } else if (visionAssistant.isAwaitingCommandReply()) {
                     // The user just asked something; a search now would only delay speaking the answer
                 } else if (hasRealAudio) {
@@ -1346,83 +1389,88 @@ void processRecordedCommand() {
     voice_stream_finished = true;
 }
 
-// Reads the push button from the PCF8574 (LOW = pressed). Returns HIGH if the
-// expander is missing, so the button logic just stays idle.
-static bool readButton() {
-    return haptics.readPin(BUTTON_PCF_PIN) ? HIGH : LOW;
+// Vibrates the motor for a direction. Main-loop side of the I2C mutex (the button task holds
+// it while reading the button).
+void hapticsDirection(HazardDirection d, uint16_t durationMs) {
+    if (!hapticsAvailable) {
+        return;
+    }
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100))) {
+        haptics.triggerDirection(d, durationMs);
+        xSemaphoreGive(i2cMutex);
+    }
 }
 
-void handleButton() {
-    static bool last_button_state = HIGH;
-    static bool button_held_down = false;
-    static int short_press_count = 0;
-    static unsigned long last_press_time = 0;
-    static unsigned long press_start_time = 0;
+// Button on PCF8574 P3 (LOW = pressed), polled every 20 ms:
+//  - held longer than 350 ms: push-to-talk (records while held, sent on release)
+//  - 5 short taps, under 1 s apart: SOS alert
+// Recording only starts once a press is clearly a hold, so SOS taps no longer each start one.
+void buttonTask(void *pvParameters) {
+    const unsigned long HOLD_TO_TALK_MS = 350;
+    const unsigned long TAP_GAP_MS = 1000;
+    const int SOS_TAPS = 5;
 
-    bool current_button_state = readButton();
+    bool pressed = false;
+    bool talking = false;
+    int taps = 0;
+    unsigned long pressStart = 0;
+    unsigned long lastTap = 0;
 
-    // Button pressed
-    if (current_button_state == LOW && last_button_state == HIGH) {
-        delay(50); // Debounce
-        if (readButton() == LOW) {
-            press_start_time = millis();
-            button_held_down = true;
-
-            // Check if this press is part of an SOS sequence
-            if (millis() - last_press_time < 1000) { // 1 second between presses for SOS
-                short_press_count++;
-            } else {
-                short_press_count = 1; // Reset if too much time has passed
-            }
-            last_press_time = millis();
-
-            Serial.printf("Button pressed, count: %d\n", short_press_count);
+    while (true) {
+        bool down = false;
+        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
+            down = !haptics.readPin(BUTTON_PCF_PIN);
+            xSemaphoreGive(i2cMutex);
         }
-    }
-    // Button released
-    else if (current_button_state == HIGH && last_button_state == LOW) {
-        if (button_held_down) {
-            unsigned long press_duration = millis() - press_start_time;
+        unsigned long now = millis();
 
-            if (press_duration < 500) { // Short press
-                Serial.printf("Short press detected (duration: %lu ms)\n", press_duration);
-                if (short_press_count >= 5) {
-                    Serial.println("🆘 SOS condition met! Sending alert.");
-                    sendEmergencyAlert("panic_button", "SOS button activated with 5 short presses.");
-                    short_press_count = 0; // Reset after sending
-                }
-            } else { // Long press (push-to-talk)
-                Serial.printf("Long press detected (duration: %lu ms) - stopping recording.\n", press_duration);
-                short_press_count = 0; // Reset SOS count on long press
-                AudioCommand cmd;
-                cmd.type = AudioCommandType::STOP_RECORDING_AND_PROCESS;
-                if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
-                    Serial.println("❌ Failed to queue STOP_RECORDING_AND_PROCESS command");
-                }
-            }
-            button_held_down = false;
-        }
-    }
-
-    // Start recording on initial press if it's not an SOS sequence that's about to trigger
-    if (button_held_down && (millis() - press_start_time > 50) && (millis() - press_start_time < 100) && short_press_count < 5) {
-        if (!is_recording) {
-            Serial.println("Starting push-to-talk recording.");
+        if (down && !pressed) {
+            pressed = true;
+            pressStart = now;
+        } else if (down && pressed && !talking && now - pressStart > HOLD_TO_TALK_MS) {
+            talking = true;
+            taps = 0;
+            Serial.println("🔘 Push-to-talk: recording while the button is held");
             AudioCommand cmd;
             cmd.type = AudioCommandType::START_RECORDING;
-            if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
-                Serial.println("❌ Failed to queue START_RECORDING command");
+            xQueueSend(audioCommandQueue, &cmd, 0);
+        } else if (!down && pressed) {
+            pressed = false;
+            if (talking) {
+                talking = false;
+                Serial.println("🔘 Push-to-talk released - sending the command");
+                AudioCommand cmd;
+                cmd.type = AudioCommandType::STOP_RECORDING_AND_PROCESS;
+                xQueueSend(audioCommandQueue, &cmd, 0);
+            } else if (now - pressStart > 30) {  // ignore contact bounce
+                taps = (now - lastTap < TAP_GAP_MS) ? taps + 1 : 1;
+                lastTap = now;
+                Serial.printf("🔘 Tap %d/%d\n", taps, SOS_TAPS);
+                if (taps >= SOS_TAPS) {
+                    taps = 0;
+                    sos_requested = true;  // the HTTPS request runs in the main loop
+                }
             }
         }
+        if (taps > 0 && now - lastTap > TAP_GAP_MS) {
+            taps = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
+}
 
-    // Reset SOS count if time between presses is too long
-    if (short_press_count > 0 && millis() - last_press_time > 1000) {
-        // Serial.println("Resetting SOS count due to timeout.");
-        short_press_count = 0;
+// Main-loop side of the button: send an SOS requested by the button task
+void handleButton() {
+    if (!sos_requested) {
+        return;
     }
-
-    last_button_state = current_button_state;
+    sos_requested = false;
+    Serial.println("🆘 SOS: 5 taps - sending alert");
+    // Immediate feedback that the SOS was registered: all three motors
+    hapticsDirection(HazardDirection::LEFT, 800);
+    hapticsDirection(HazardDirection::CENTER, 800);
+    hapticsDirection(HazardDirection::RIGHT, 800);
+    sendEmergencyAlert("panic_button", "SOS: el usuario presiono el boton de emergencia 5 veces.");
 }
 
 void checkAndAnnounceNearbyPlaces() {
@@ -1520,7 +1568,7 @@ void checkNearbyHazards() {
             String category = doc[0]["category"].as<String>();
             if (closestDistance <= HAZARD_ALERT_RADIUS_M) {
                 Serial.printf("⚠️ Shared hazard nearby: %s (%.1fm away)\n", category.c_str(), closestDistance);
-                haptics.triggerDirection(HazardDirection::CENTER);
+                hapticsDirection(HazardDirection::CENTER);
             }
         }
     } else if (httpResponseCode > 0) {
@@ -1625,6 +1673,21 @@ void loop() {
     // Handle button presses for push-to-talk and SOS
     handleButton();
 
+#ifdef TEST_HAPTICS
+    // Test-only build flag: once setup is done, pulse left, center, right (twice) to check the motors
+    // on the real board without waiting for Gemini to report a hazard
+    static int hapticTestStep = 0;
+    static unsigned long nextHapticTest = millis() + 3000;
+    if (hapticsAvailable && hapticTestStep < 6 && millis() > nextHapticTest) {
+        const HazardDirection dirs[] = {HazardDirection::LEFT, HazardDirection::CENTER, HazardDirection::RIGHT};
+        const char* names[] = {"IZQUIERDA", "CENTRO", "DERECHA"};
+        Serial.printf("🧪 Test motor %s\n", names[hapticTestStep % 3]);
+        hapticsDirection(dirs[hapticTestStep % 3], 600);
+        hapticTestStep++;
+        nextHapticTest = millis() + 1500;
+    }
+#endif
+
 #ifdef TEST_COMMAND_AFTER_MS
 #ifndef TEST_COMMAND_TEXT
 #define TEST_COMMAND_TEXT "Dime qué ves."
@@ -1652,7 +1715,10 @@ void loop() {
     // Check the shared hazard network and turn off any haptic motors whose pulse ended
     checkNearbyHazards();
     if (hapticsAvailable) {
-        haptics.update();
+        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
+            haptics.update();
+            xSemaphoreGive(i2cMutex);
+        }
     }
 
     // Check for commands from the audio task
