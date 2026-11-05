@@ -50,6 +50,22 @@ void HapticDriver::triggerDirection(HazardDirection direction, uint16_t duration
     }
 }
 
+void HapticDriver::alertDirection(HazardDirection direction, uint8_t pulses, uint16_t onMs, uint16_t offMs) {
+    HapticMotor motor;
+    switch (direction) {
+        case HazardDirection::LEFT:   motor = MOTOR_LEFT; break;
+        case HazardDirection::CENTER: motor = MOTOR_CENTER; break;
+        case HazardDirection::RIGHT:  motor = MOTOR_RIGHT; break;
+        default: return;
+    }
+    if (!initialized || pulses == 0) return;
+    pulsesLeft[motor] = pulses - 1;
+    pulseOnMs[motor] = onMs;
+    pulseOffMs[motor] = offMs;
+    motorOnAt[motor] = 0;
+    pulse(motor, onMs);
+}
+
 void HapticDriver::update() {
     if (!initialized) return;
     unsigned long now = millis();
@@ -57,6 +73,14 @@ void HapticDriver::update() {
         if (motorOffAt[m] != 0 && now >= motorOffAt[m]) {
             setMotor((HapticMotor)m, false);
             motorOffAt[m] = 0;
+            if (pulsesLeft[m] > 0) {
+                motorOnAt[m] = now + pulseOffMs[m];
+            }
+        }
+        if (motorOnAt[m] != 0 && now >= motorOnAt[m]) {
+            motorOnAt[m] = 0;
+            pulsesLeft[m]--;
+            pulse((HapticMotor)m, pulseOnMs[m]);
         }
     }
 }

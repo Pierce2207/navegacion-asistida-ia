@@ -110,6 +110,11 @@ bool TTS::speakText(const String& text, const String& language) {
 
     // Play the downloaded audio
     Serial.println("▶️ Starting audio playback...");
+    if (onPlaybackStart) {
+        void (*fn)() = onPlaybackStart;
+        onPlaybackStart = nullptr;
+        fn();
+    }
     unsigned long playbackStartTime = millis();
     bool playResult = playAudioData(audioData, dataSize);
     unsigned long totalTime = millis() - startTime;

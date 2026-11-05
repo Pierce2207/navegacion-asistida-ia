@@ -66,13 +66,29 @@ bool VisionAssistant::initialize() {
 void VisionAssistant::run() {
     // WiFi lost for a while (e.g. walked out of the house): switch to the other network. The
     // ESP32 only retries the network it was on, which never comes back once the user has left.
-    if (WiFi.status() != WL_CONNECTED) {
+    // A flapping network (up a few seconds, down again) never stays down 20 s in a row but is
+    // just as unusable: several drops in a short window also switch networks.
+    bool wifiUp = WiFi.status() == WL_CONNECTED;
+    if (wifiWasUp && !wifiUp) {
+        if (millis() - wifiDropWindowStart > WIFI_DROP_WINDOW_MS) {
+            wifiDropWindowStart = millis();
+            wifiDrops = 0;
+        }
+        wifiDrops++;
+    }
+    wifiWasUp = wifiUp;
+    bool haveSecondNetwork = WIFI_SSID_2 && WIFI_SSID_2[0];
+    if (!wifiUp) {
+        bool longDown = wifiDownSince != 0 && millis() - wifiDownSince > WIFI_SWITCH_AFTER_MS;
+        bool flapping = wifiDrops >= WIFI_DROPS_TO_SWITCH;
         if (wifiDownSince == 0) {
             wifiDownSince = millis();
-        } else if (millis() - wifiDownSince > WIFI_SWITCH_AFTER_MS && WIFI_SSID_2 && WIFI_SSID_2[0]) {
-            Serial.println("WiFi down for a while - trying the other network");
+        } else if ((longDown || flapping) && haveSecondNetwork) {
+            Serial.printf("WiFi %s - trying the other network\n", flapping ? "keeps dropping" : "down for a while");
             beginWiFiNetwork(1 - wifiNetwork);
             wifiDownSince = millis();  // give it the same time before switching back
+            wifiDrops = 0;
+            wifiDropWindowStart = millis();
         }
     } else {
         wifiDownSince = 0;
@@ -254,8 +270,12 @@ void VisionAssistant::processFrame() {
     GPSData gpsData = gps.getGPSData();
     String gpsText = "";
     
-    if (gpsData.isValid && gps.hasValidFix()) {
-        gpsText = "Current GPS location: Latitude " + String(gpsData.latitude, 6) + 
+    bool haveLocation = hasLocationOverride || (gpsData.isValid && gps.hasValidFix());
+    if (hasLocationOverride) {
+        gpsText = "Current GPS location: Latitude " + String(overrideLat, 6) +
+                 ", Longitude " + String(overrideLon, 6) + ". ";
+    } else if (gpsData.isValid && gps.hasValidFix()) {
+        gpsText = "Current GPS location: Latitude " + String(gpsData.latitude, 6) +
                  ", Longitude " + String(gpsData.longitude, 6) + 
                  ", Altitude " + String(gpsData.altitude, 1) + "m. ";
         Serial.printf("Including GPS data: %s\n", gpsText.c_str());
@@ -264,7 +284,7 @@ void VisionAssistant::processFrame() {
         Serial.println("GPS data not available or not recent");
     }
 
-    if (currentAddress.length() > 0 && gpsData.isValid && gps.hasValidFix()) {
+    if (currentAddress.length() > 0 && haveLocation) {
         // Escaped like the rest of the frame text: it goes into a JSON string
         String address = currentAddress;
         address.replace("\\", "\\\\");

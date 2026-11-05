@@ -59,7 +59,12 @@ public:
     bool playAudioData(const uint8_t* audioData, size_t dataSize);
     void stopPlayback();
     void cancel();
-    
+
+    // Called once right before the next speakText() starts playing (after its download), then
+    // cleared: lets a turn's vibration land together with its spoken instruction
+    void setOnPlaybackStart(void (*fn)()) { onPlaybackStart = fn; }
+    void (*onPlaybackStart)() = nullptr;
+
 // Tone generation
     void playTone(int frequency, int duration);
     // I2S resource management

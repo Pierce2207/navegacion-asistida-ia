@@ -111,6 +111,7 @@ enum class AudioCommandType {
 struct AudioCommand {
     AudioCommandType type;
     char text[256]; // For SPEAK_TEXT command
+    char vibrateSide = 0; // SPEAK_TEXT: 'L'/'C'/'R' motor pulsed as the speech starts playing, 0 = none
 };
 
 // Struct for command messages (safer than String objects)
@@ -134,9 +135,12 @@ void processRecordedCommand();
 void handleButton();
 void buttonTask(void *pvParameters);
 void hapticsDirection(HazardDirection d, uint16_t durationMs = 300);
+void hapticsAlert(HazardDirection d);
 void navSpeak(const String& text);
 void navVibrate(char side);
 void navNetwork(bool start);
+extern volatile char playbackVibrateSide;
+void vibrateOnPlayback();
 void checkAndAnnounceNearbyPlaces();
 void checkNearbyHazards();
 String stripHtmlTags(const String& html);
@@ -438,7 +442,7 @@ void handleSystemAction(const JsonDocument& doc) {
             else if (direction == "center") d = HazardDirection::CENTER;
             else if (direction == "right") d = HazardDirection::RIGHT;
             if (d != HazardDirection::UNKNOWN) {
-                hapticsDirection(d);
+                hapticsAlert(d);
             } else {
                 Serial.println("⚠️ obstacle_alert had no valid direction - skipping haptic pulse");
             }
@@ -1032,7 +1036,11 @@ void audioTask(void *pvParameters) {
         // Speech and wake word search must not overlap: each opens a TLS connection (~40KB heap),
         // and running both at once exhausted the heap and broke WiFi/DNS. Wait for an in-flight
         // search before taking a command (same delay as when the search ran inline).
-        if (wakeSearchBusy && uxQueueMessagesWaiting(audioCommandQueue) > 0) {
+        // Only speech needs this: recording opens no connection, and making push-to-talk wait for
+        // a 1-3 s search lost the start of the question (once, all of it: 1 KB recorded in 3 s).
+        AudioCommand nextCmd;
+        if (wakeSearchBusy && xQueuePeek(audioCommandQueue, &nextCmd, 0) == pdTRUE &&
+            nextCmd.type == AudioCommandType::SPEAK_TEXT) {
             while (wakeSearchBusy) {
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
@@ -1046,7 +1054,12 @@ void audioTask(void *pvParameters) {
             if (receivedCmd.type == AudioCommandType::SPEAK_TEXT) {
                 Serial.printf("🎤 Audio task received SPEAK_TEXT: \"%s\"\n", receivedCmd.text);
                 visionAssistant.setFramesPaused(true);  // leave the WiFi link to the speech download
+                if (receivedCmd.vibrateSide) {
+                    playbackVibrateSide = receivedCmd.vibrateSide;
+                    tts.setOnPlaybackStart(vibrateOnPlayback);
+                }
                 tts.speakText(String(receivedCmd.text));
+                tts.setOnPlaybackStart(nullptr);
                 visionAssistant.setFramesPaused(false);
                 is_speaking = false; // Reset flag after speaking is done
             } else if (receivedCmd.type == AudioCommandType::PLAY_DING) {
@@ -1353,6 +1366,18 @@ void processRecordedCommand() {
 
 // Vibrates the motor for a direction. Main-loop side of the I2C mutex (the button task holds
 // it while reading the button).
+// Hazard pattern: three short pulses (brr-brr-brr) on that side, so a hazard is not mistaken
+// for a turn instruction, which is one long pulse
+void hapticsAlert(HazardDirection d) {
+    if (!hapticsAvailable) {
+        return;
+    }
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100))) {
+        haptics.alertDirection(d);
+        xSemaphoreGive(i2cMutex);
+    }
+}
+
 void hapticsDirection(HazardDirection d, uint16_t durationMs) {
     if (!hapticsAvailable) {
         return;
@@ -1382,6 +1407,9 @@ void buttonTask(void *pvParameters) {
         bool down = false;
         if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
             down = !haptics.readPin(BUTTON_PCF_PIN);
+            // Motor pulses are timed here (every 20 ms), not in loop(): loop() can block for
+            // hundreds of ms on frames and network, which smeared the short hazard pulses together
+            haptics.update();
             xSemaphoreGive(i2cMutex);
         }
         unsigned long now = millis();
@@ -1530,7 +1558,7 @@ void checkNearbyHazards() {
             String category = doc[0]["category"].as<String>();
             if (closestDistance <= HAZARD_ALERT_RADIUS_M) {
                 Serial.printf("⚠️ Shared hazard nearby: %s (%.1fm away)\n", category.c_str(), closestDistance);
-                hapticsDirection(HazardDirection::CENTER);
+                hapticsAlert(HazardDirection::CENTER);
             }
         }
     } else if (httpResponseCode > 0) {
@@ -1621,10 +1649,18 @@ void pumpVoiceToGemini() {
 
 // --- Navigation glue: the Navigator speaks, vibrates and does HTTPS through these ---
 
+// The navigator calls vibrate(side) and then speak(text) for a turn. Speech starts seconds later
+// (download, and earlier instructions still playing), so the vibration rides along with the
+// speech and fires when it starts playing: vibrating at once made the left motor buzz while the
+// previous "turn right" was still being said.
+static char pendingNavSide = 0;
+
 void navSpeak(const String& text) {
     // Queued even if something is being said: a turn instruction must not be dropped
     AudioCommand cmd;
     cmd.type = AudioCommandType::SPEAK_TEXT;
+    cmd.vibrateSide = pendingNavSide;
+    pendingNavSide = 0;
     strncpy(cmd.text, text.c_str(), sizeof(cmd.text) - 1);
     cmd.text[sizeof(cmd.text) - 1] = '\0';
     is_speaking = true;
@@ -1634,7 +1670,18 @@ void navSpeak(const String& text) {
 }
 
 void navVibrate(char side) {
-    hapticsDirection(side == 'L' ? HazardDirection::LEFT : side == 'R' ? HazardDirection::RIGHT : HazardDirection::CENTER, 600);
+    pendingNavSide = side;
+}
+
+// Runs in the audio task right before a navigation instruction starts playing
+volatile char playbackVibrateSide = 0;
+void vibrateOnPlayback() {
+    char side = playbackVibrateSide;
+    Serial.printf("📳 Turn vibration: %s motor\n", side == 'L' ? "left" : side == 'R' ? "right" : "center");
+    hapticsDirection(side == 'L' ? HazardDirection::LEFT : side == 'R' ? HazardDirection::RIGHT : HazardDirection::CENTER, 500);
+    // Let the motor stop before the speaker starts: motor + amplifier + WiFi together drew more
+    // than the USB supply gives and the board browned out (seen on a turn instruction)
+    vTaskDelay(pdMS_TO_TICKS(550));
 }
 
 // Same TLS-memory dance as the SOS: no new wake word searches, and let one in flight finish
@@ -1650,15 +1697,22 @@ void navNetwork(bool start) {
     }
 }
 
+// Guide mode timing: narrate after this long without any speech, at most this often
+const unsigned long GUIDE_QUIET_MS = 2500;
+const unsigned long GUIDE_EVERY_MS = 8000;
+#ifndef TEST_FAKE_WALK_MS
+#define TEST_FAKE_WALK_MS 10000
+#endif
+
 // Position used for navigation (a fake one in the desk-test builds)
 bool currentFix(double& lat, double& lon) {
 #ifdef TEST_FAKE_GPS_LAT
     static double fakeLat = TEST_FAKE_GPS_LAT, fakeLon = TEST_FAKE_GPS_LON;
 #ifdef TEST_FAKE_WALK
-    // "Walk" to the next maneuver every 10 s so the whole route can be heard at a desk
+    // "Walk" to the next maneuver every TEST_FAKE_WALK_MS so the whole route can be heard at a desk
     static unsigned long lastHop = 0;
     double nLat, nLon;
-    if (millis() - lastHop > 10000 && navigator.nextStepLocation(nLat, nLon)) {
+    if (millis() - lastHop > TEST_FAKE_WALK_MS && navigator.nextStepLocation(nLat, nLon)) {
         lastHop = millis();
         fakeLat = nLat;
         fakeLon = nLon;
@@ -1753,18 +1807,31 @@ void loop() {
     {
         double lat, lon;
         bool fix = currentFix(lat, lon);
+#ifdef TEST_FAKE_GPS_LAT
+        visionAssistant.setLocationOverride(lat, lon);
+#endif
         navigator.update(fix, lat, lon);
         updateCurrentAddress(fix, lat, lon);
     }
 
-    // Check the shared hazard network and turn off any haptic motors whose pulse ended
-    checkNearbyHazards();
-    if (hapticsAvailable) {
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
-            haptics.update();
-            xSemaphoreGive(i2cMutex);
+    // Guide mode: while a route is active, Gemini narrates the path ahead in one short sentence
+    // (or warns, with vibration, about anything in the way) whenever the device is quiet
+    {
+        static unsigned long lastGuideAt = 0;
+        static unsigned long quietSince = 0;
+        bool busy = is_speaking || is_recording || voice_stream_active ||
+                    visionAssistant.isAwaitingCommandReply() || priority_request;
+        if (busy || !navigator.isActive()) {
+            quietSince = millis();
+        } else if (millis() - quietSince > GUIDE_QUIET_MS && millis() - lastGuideAt > GUIDE_EVERY_MS) {
+            lastGuideAt = millis();
+            Serial.println("🦮 Guide mode: asking Gemini to describe the path ahead");
+            visionAssistant.queueUserCommand("GUIDE MODE: en una frase corta, ¿cómo está el camino delante de mí?");
         }
     }
+
+    // Check the shared hazard network (motor pulses are turned off in buttonTask)
+    checkNearbyHazards();
 
     // Check for commands from the audio task
     CommandMessage cmdMsg;

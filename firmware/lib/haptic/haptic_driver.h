@@ -49,6 +49,10 @@ public:
     // devuelve Gemini en el systemAction, o al resultado del bearing GPS.
     void triggerDirection(HazardDirection direction, uint16_t durationMs = 300);
 
+    // Patron de ALERTA de peligro: varios pulsos cortos (brr-brr-brr) en el motor del lado,
+    // para distinguirlo del pulso largo y unico de las indicaciones de navegacion (no bloqueante)
+    void alertDirection(HazardDirection direction, uint8_t pulses = 3, uint16_t onMs = 150, uint16_t offMs = 120);
+
     // Debe llamarse en cada loop() del firmware principal: apaga los
     // motores cuyo tiempo de pulso ya termino.
     void update();
@@ -67,6 +71,11 @@ private:
     uint8_t i2cAddr = PCF8574_ADDR;
     uint8_t outputState = 0xFF;              // activo en LOW, todo apagado = todos en 1
     unsigned long motorOffAt[3] = {0, 0, 0};  // timestamp en el que cada motor debe apagarse
+    // Pulsos de alerta pendientes por motor: al apagarse, si quedan pulsos se vuelve a encender
+    uint8_t pulsesLeft[3] = {0, 0, 0};
+    uint16_t pulseOnMs[3] = {0, 0, 0};
+    uint16_t pulseOffMs[3] = {0, 0, 0};
+    unsigned long motorOnAt[3] = {0, 0, 0};   // timestamp del siguiente encendido (0 = ninguno)
     bool initialized = false;
 
     void writeState();

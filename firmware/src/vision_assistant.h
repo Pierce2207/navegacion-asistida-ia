@@ -43,11 +43,20 @@ private:
     String responseLanguage;
 
     String currentAddress;
+    bool hasLocationOverride = false;
+    double overrideLat = 0;
+    double overrideLon = 0;
 
     // Which network we're on (0 = WIFI_SSID, 1 = WIFI_SSID_2) and since when the link is down
     int wifiNetwork = 0;
     unsigned long wifiDownSince = 0;
     static const unsigned long WIFI_SWITCH_AFTER_MS = 20000;
+    // ...or after this many drops within the window (link keeps coming back and dropping)
+    static const int WIFI_DROPS_TO_SWITCH = 4;
+    static const unsigned long WIFI_DROP_WINDOW_MS = 90000;
+    bool wifiWasUp = false;
+    int wifiDrops = 0;
+    unsigned long wifiDropWindowStart = 0;
 
     // When a frame carried a user voice command, hold further frames until Gemini answers:
     // each frame is a complete turn, and a new turn interrupts the reply to the previous one
@@ -118,6 +127,14 @@ public:
     // Street address for the current GPS fix (main loop looks it up), sent with every frame so
     // Gemini can answer "where am I?"
     void setCurrentAddress(const String& address) { currentAddress = address; }
+
+    // Demo / test builds with a simulated GPS: frames report this position instead of the
+    // module's (indoors it has no fix, and Gemini kept saying it had no location)
+    void setLocationOverride(double lat, double lon) {
+        overrideLat = lat;
+        overrideLon = lon;
+        hasLocationOverride = true;
+    }
 
     // A user command is queued, being spoken or sent, and Gemini hasn't answered it yet
     bool isAwaitingCommandReply() const { return commandPendingSince != 0 || queueSize > 0 || voiceCommandActive; }
