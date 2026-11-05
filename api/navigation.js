@@ -97,13 +97,14 @@ async function route(lat, lon, dest, known) {
   }
 
   const best = r.routes[0];
-  const steps = best.legs[0].steps.slice(0, MAX_STEPS).map((s) => ({
+  const all = best.legs[0].steps.map((s) => ({
     lat: round(s.maneuver.location[1]),
     lon: round(s.maneuver.location[0]),
     text: instruction(s),
     side: sideOf(s.maneuver),
     distance_m: Math.round(s.distance),
   }));
+  const steps = mergeCloseSteps(all).slice(0, MAX_STEPS);
 
   const distance = Math.round(best.distance);
   return {
@@ -116,19 +117,54 @@ async function route(lat, lon, dest, known) {
   };
 }
 
+// OpenStreetMap dibuja veredas y cruces con muchos quiebres: "izquierda 8 m, derecha 5 m, izquierda".
+// Caminando no da tiempo a escuchar cada uno, así que los giros a menos de MERGE_M del anterior se
+// dicen juntos en una sola indicación ("Gira a la izquierda, luego a la derecha y sigue 90 metros").
+const MERGE_M = 15;
+function mergeCloseSteps(steps) {
+  const out = [];
+  for (const s of steps) {
+    const prev = out[out.length - 1];
+    const isLast = s === steps[steps.length - 1];
+    if (prev && prev.distance_m < MERGE_M && !isLast && out.length > 1) {
+      const turn = s.text.replace(/^Gira /, "").replace(/\.$/, "");
+      prev.text = `${prev.text.replace(/ y sigue [^.]*\./, "").replace(/\.$/, "")}, luego ${turn}.`;
+      prev.distance_m += s.distance_m;
+      if (prev.side === "center") prev.side = s.side;
+      continue;
+    }
+    out.push({ ...s });
+  }
+  return out;
+}
+
 // Busca primero cerca del usuario (~5 km); si no hay nada, en todo el Perú
+// En Perú "Plaza de Armas" y "Plaza Mayor" son la misma plaza, pero OSM suele usar solo un nombre
+// (la de Lima figura como "Plaza Mayor"): se buscan ambos
+function queryVariants(dest) {
+  const v = [dest];
+  if (/plaza de armas/i.test(dest)) v.push(dest.replace(/plaza de armas/i, "Plaza Mayor"));
+  else if (/plaza mayor/i.test(dest)) v.push(dest.replace(/plaza mayor/i, "Plaza de Armas"));
+  return v;
+}
+
 async function findPlace(lat, lon, dest) {
-  const q = encodeURIComponent(dest);
   const d = 0.05;
   const viewbox = `${lon - d},${lat + d},${lon + d},${lat - d}`;
-  let hits = await getJson(`${NOMINATIM}/search?format=jsonv2&limit=1&q=${q}&viewbox=${viewbox}&bounded=1`);
+  let hits = [];
+  for (const v of queryVariants(dest)) {
+    const q = encodeURIComponent(v);
+    hits = hits.concat(await getJson(`${NOMINATIM}/search?format=jsonv2&limit=10&q=${q}&viewbox=${viewbox}&bounded=1`));
+  }
   if (!hits.length) {
-    hits = await getJson(`${NOMINATIM}/search?format=jsonv2&limit=1&countrycodes=pe&q=${q}`);
+    hits = await getJson(`${NOMINATIM}/search?format=jsonv2&limit=10&countrycodes=pe&q=${encodeURIComponent(dest)}`);
   }
   if (!hits.length) {
     return null;
   }
-  const h = hits[0];
+  // Nominatim ordena por relevancia, no por distancia: hay muchas "Plaza de Armas", la útil es la más cercana
+  const dist2 = (h) => (Number(h.lat) - lat) ** 2 + ((Number(h.lon) - lon) * Math.cos((lat * Math.PI) / 180)) ** 2;
+  const h = hits.reduce((best, x) => (dist2(x) < dist2(best) ? x : best));
   return { name: h.name || h.display_name.split(",")[0], lat: Number(h.lat), lon: Number(h.lon) };
 }
 

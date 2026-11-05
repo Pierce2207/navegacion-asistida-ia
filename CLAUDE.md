@@ -72,3 +72,22 @@ con salidas en alto: así los motores quedan apagados al encender.
 - Corregir el README raíz: dice `firmware/haptic/`, pero el módulo está en `firmware/lib/haptic/`;
   y quitar la línea de prueba "ta bien esta prueba :V" al final del README.
 - Reactivar Supabase y probar notificaciones de punta a punta (ESP32 → Vercel → Supabase → app).
+
+## Estado (4 nov 2026) — esto reemplaza lo anterior donde se contradiga
+- Todo el hardware probado JUNTO en la ESP32-CAM (sobre la MB, cable USB bueno): cámara OV2640 (la
+  OV3660 se dañó), parlante, mic INMP441 (formato I2S STAND_MSB), GPS en GPIO3/U0R (módulo multi-
+  constelación $GN, funciona), PCF8574 en SDA=GPIO15/SCL=GPIO4 con 3 motores PNP, botón en P3.
+- Voz: palabra "Visión" (búsqueda Deepgram a 8 kHz); la pregunta va como AUDIO directo a Gemini Live
+  (activityStart/End manual) -> respuesta en ~1 s; voz de salida Deepgram aura-2-celeste-es en MP3.
+- Botón (tarea propia): mantener >350 ms = hablar; 5 toques = SOS -> llega notificación al celular.
+- Alertas de peligro: vibra primero el motor del lado (left/center/right) y luego habla.
+- Navegación (OpenStreetMap, api/navigation.js + firmware/src/navigation.*): "llévame a X",
+  "¿dónde estoy?", guía giro a giro con voz y motores, recálculo. Backend desplegado y probado;
+  EN LA PLACA AÚN NO PROBADO (siguiente paso: build con -DTEST_FAKE_GPS_LAT=-12.0517
+  -DTEST_FAKE_GPS_LON=-77.0345 -DTEST_FAKE_WALK y pedir "llévame a la Plaza de Armas").
+- WiFi: WIFI_SSID_2/WIFI_PASSWORD_2 en secrets.cpp = hotspot del celular (2.4 GHz) para la calle;
+  el usuario debe llenarlos. secrets.h tiene los extern nuevos (secrets.h está en .gitignore).
+- Lecciones: el USB débil de la laptop causaba brownout y cortes de WiFi; fuente siempre a 5V/VIN,
+  nunca a 3V3 (así se dañó una DevKit). Antes de subir firmware, desconectar el TX del GPS (GPIO3).
+- Pendiente: prueba de navegación en la mesa y luego prueba real en la calle (power bank + hotspot);
+  alimentación con baterías (BMS 2S + LM2596S + capacitor 1000 µF); placa y carcasa (compañero).

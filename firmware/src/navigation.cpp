@@ -166,6 +166,14 @@ void Navigator::update(bool fixValid, double lat, double lon) {
         return;
     }
 
+    // Several maneuvers already within reach (bunched corners, or the user walked past one):
+    // announce only the farthest, otherwise the speech queue falls behind the user
+    while (!announced && next + 1 < steps.size() &&
+           distanceMeters(lat, lon, steps[next + 1].lat, steps[next + 1].lon) <= ANNOUNCE_M) {
+        Serial.printf("🧭 Skipping step %u (the next one is already close)\n", (unsigned)next);
+        next++;
+    }
+
     const NavStep& step = steps[next];
     double d = distanceMeters(lat, lon, step.lat, step.lon);
     bool isArrival = (next == steps.size() - 1);
