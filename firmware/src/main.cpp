@@ -9,6 +9,7 @@
 #include "settings_manager.h"
 #include <ArduinoJson.h>
 #include "haptic_driver.h"
+#include "navigation.h"
 
 VisionAssistant visionAssistant;
 TTS tts;
@@ -20,6 +21,7 @@ bool hapticsAvailable = false;
 // The PCF8574 (motors + button) is now used from two tasks: the main loop and the button task
 SemaphoreHandle_t i2cMutex = NULL;
 volatile bool sos_requested = false;  // set by the button task, sent from the main loop
+Navigator navigator;
 
 // GPS state for the shared hazard network check (separate from the places-API tracker)
 GPSData last_hazard_check_gps;
@@ -80,7 +82,7 @@ QueueHandle_t audioCommandQueue; // For sending commands to the audio task
 TaskHandle_t WakeSearchTaskHandle = NULL;
 volatile bool wakeSearchBusy = false;  // stt_temp_buffer is in use by the search task
 volatile bool wakeSearchHit = false;   // result of the last finished search, consumed by audioTask
-volatile bool sos_in_progress = false; // no new wake word searches while an SOS is being sent
+volatile bool priority_request = false; // SOS / navigation HTTPS in flight: no new wake word searches
 
 // Spoken command streaming: the audio task records into command_buffer, and the main loop
 // (which owns the Gemini WebSocket) forwards it as 8 kHz audio while the user is still talking.
@@ -132,6 +134,9 @@ void processRecordedCommand();
 void handleButton();
 void buttonTask(void *pvParameters);
 void hapticsDirection(HazardDirection d, uint16_t durationMs = 300);
+void navSpeak(const String& text);
+void navVibrate(char side);
+void navNetwork(bool start);
 void checkAndAnnounceNearbyPlaces();
 void checkNearbyHazards();
 String stripHtmlTags(const String& html);
@@ -153,63 +158,18 @@ void toolHandler(const String& toolName, const String& jsonParams) {
         
         handleSystemAction(doc);
     } else if (toolName == "getDirections") {
+        // Walking route from our backend (OpenStreetMap). The old code called Google Directions
+        // with the Gemini key, which Maps rejects ("API key is invalid"), and only read 3 steps.
         JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, jsonParams);
-        if (error) {
-            Serial.printf("Failed to parse getDirections JSON: %s\n", error.c_str());
+        if (deserializeJson(doc, jsonParams)) {
+            Serial.println("Failed to parse getDirections JSON");
             return;
         }
         String destination = doc["destination"].as<String>();
-        Serial.printf("getDirections call received with destination: %s\n", destination.c_str());
-
-        GPSData origin = visionAssistant.getCurrentGPSData();
-        if (!origin.isValid) {
-            String message = "Sorry, I can't get directions without a valid GPS location.";
-            AudioCommand cmd;
-            cmd.type = AudioCommandType::SPEAK_TEXT;
-            strncpy(cmd.text, message.c_str(), sizeof(cmd.text) - 1);
-            cmd.text[sizeof(cmd.text) - 1] = '\0';
-            xQueueSend(audioCommandQueue, &cmd, 0);
-            return;
-        }
-
-        HTTPClient http;
-        String url = "https://maps.googleapis.com/maps/api/directions/json?origin=" +
-                     String(origin.latitude, 6) + "," + String(origin.longitude, 6) +
-                     "&destination=" + destination +
-                     "&key=" + String(GEMINI_API_KEY);
-        
-        http.begin(url);
-        int httpResponseCode = http.GET();
-        String directions = "";
-
-        if (httpResponseCode == 200) {
-            String payload = http.getString();
-            JsonDocument dirDoc;
-            deserializeJson(dirDoc, payload);
-
-            if (dirDoc["status"] == "OK") {
-                JsonArray steps = dirDoc["routes"][0]["legs"][0]["steps"];
-                directions = "Starting route. ";
-                for (int i = 0; i < steps.size() && i < 3; i++) { // Read out first 3 steps
-                    String instruction = steps[i]["html_instructions"];
-                    directions += stripHtmlTags(instruction) + ". ";
-                }
-            } else {
-                directions = "Sorry, I could not find directions to " + destination;
-            }
-        } else {
-            directions = "Sorry, there was an error getting directions.";
-        }
-        http.end();
-
-        AudioCommand cmd;
-        cmd.type = AudioCommandType::SPEAK_TEXT;
-        strncpy(cmd.text, directions.c_str(), sizeof(cmd.text) - 1);
-        cmd.text[sizeof(cmd.text) - 1] = '\0';
-        if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
-            Serial.println("❌ Failed to queue SPEAK_TEXT command for directions");
-        }
+        Serial.printf("🧭 getDirections: %s\n", destination.c_str());
+        navigator.requestRoute(destination);  // fetched from the main loop, see navigator.update()
+    } else if (toolName == "stopNavigation") {
+        navigator.stop(true);
      } else {
          Serial.printf("Tool call handler invoked for unknown tool: %s\n", toolName.c_str());
      }
@@ -414,7 +374,7 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     // search or a speech download in flight there wasn't memory for it ("SSL - Memory allocation
     // failed", 3 out of 3 attempts). So: stop new searches, let the ones in flight finish, and if
     // that's still not enough, drop the Gemini connection (it reconnects by itself).
-    sos_in_progress = true;
+    priority_request = true;
     unsigned long waitStart = millis();
     while ((wakeSearchBusy || is_speaking) && millis() - waitStart < 8000) {
         delay(50);
@@ -432,7 +392,7 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
             Serial.printf("✅ Emergency notification sent successfully! Response code: %d\n", httpResponseCode);
             Serial.printf("Response: %s\n", response.c_str());
             http.end();
-            sos_in_progress = false;
+            priority_request = false;
             return;
         }
         Serial.printf("❌ Emergency notification attempt %d/%d failed: %s (heap %u, largest block %u)\n",
@@ -446,7 +406,7 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
         delay(1500);
     }
     Serial.println("❌ Could not send the emergency notification");
-    sos_in_progress = false;
+    priority_request = false;
 }
 
 void handleSystemAction(const JsonDocument& doc) {
@@ -833,6 +793,8 @@ void setup() {
     } else {
         Serial.println("Haptic driver initialized successfully!");
     }
+
+    navigator.begin(HAZARDS_API_URL, navSpeak, navVibrate, navNetwork);
 
     // Initialize language settings after WiFi is connected
     initializeLanguageSettings();
@@ -1239,8 +1201,8 @@ void audioTask(void *pvParameters) {
             if (!wakeWordDetected) {
                 if (uxQueueMessagesWaiting(audioCommandQueue) > 0) {
                     // Something is about to be spoken; let it go first (see the wait above)
-                } else if (sos_in_progress) {
-                    // The SOS request needs the TLS memory a search would take
+                } else if (priority_request) {
+                    // An SOS or navigation request needs the TLS memory a search would take
                 } else if (visionAssistant.isAwaitingCommandReply()) {
                     // The user just asked something; a search now would only delay speaking the answer
                 } else if (hasRealAudio) {
@@ -1657,6 +1619,83 @@ void pumpVoiceToGemini() {
     }
 }
 
+// --- Navigation glue: the Navigator speaks, vibrates and does HTTPS through these ---
+
+void navSpeak(const String& text) {
+    // Queued even if something is being said: a turn instruction must not be dropped
+    AudioCommand cmd;
+    cmd.type = AudioCommandType::SPEAK_TEXT;
+    strncpy(cmd.text, text.c_str(), sizeof(cmd.text) - 1);
+    cmd.text[sizeof(cmd.text) - 1] = '\0';
+    is_speaking = true;
+    if (xQueueSend(audioCommandQueue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
+        Serial.println("❌ Failed to queue navigation speech");
+    }
+}
+
+void navVibrate(char side) {
+    hapticsDirection(side == 'L' ? HazardDirection::LEFT : side == 'R' ? HazardDirection::RIGHT : HazardDirection::CENTER, 600);
+}
+
+// Same TLS-memory dance as the SOS: no new wake word searches, and let one in flight finish
+void navNetwork(bool start) {
+    if (start) {
+        priority_request = true;
+        unsigned long waitStart = millis();
+        while (wakeSearchBusy && millis() - waitStart < 6000) {
+            delay(50);
+        }
+    } else {
+        priority_request = false;
+    }
+}
+
+// Position used for navigation (a fake one in the desk-test builds)
+bool currentFix(double& lat, double& lon) {
+#ifdef TEST_FAKE_GPS_LAT
+    static double fakeLat = TEST_FAKE_GPS_LAT, fakeLon = TEST_FAKE_GPS_LON;
+#ifdef TEST_FAKE_WALK
+    // "Walk" to the next maneuver every 10 s so the whole route can be heard at a desk
+    static unsigned long lastHop = 0;
+    double nLat, nLon;
+    if (millis() - lastHop > 10000 && navigator.nextStepLocation(nLat, nLon)) {
+        lastHop = millis();
+        fakeLat = nLat;
+        fakeLon = nLon;
+        Serial.printf("🧪 Fake GPS jumps to the next maneuver (%.6f, %.6f)\n", fakeLat, fakeLon);
+    }
+#endif
+    lat = fakeLat;
+    lon = fakeLon;
+    return true;
+#else
+    GPSData g = visionAssistant.getCurrentGPSData();
+    lat = g.latitude;
+    lon = g.longitude;
+    return g.isValid;
+#endif
+}
+
+// Keeps the street address of the current position fresh for "where am I?" (sent with frames)
+void updateCurrentAddress(bool fix, double lat, double lon) {
+    static unsigned long lastLookup = 0;
+    static double lastLat = 0, lastLon = 0;
+    if (!fix || WiFi.status() != WL_CONNECTED || millis() - lastLookup < 45000) {
+        return;
+    }
+    if (lastLookup != 0 && Navigator::distanceMeters(lat, lon, lastLat, lastLon) < 25) {
+        return;  // hasn't moved enough to be on another block
+    }
+    lastLookup = millis();
+    String address = navigator.lookupAddress(lat, lon);
+    if (address.length() > 0) {
+        lastLat = lat;
+        lastLon = lon;
+        Serial.printf("📍 %s\n", address.c_str());
+        visionAssistant.setCurrentAddress(address);
+    }
+}
+
 void loop() {
     // Ensure we don't start processing until setup is complete
     static bool setup_done = false;
@@ -1709,8 +1748,14 @@ void loop() {
     // Stream a spoken command to Gemini while it's being recorded
     pumpVoiceToGemini();
 
-    // Check for nearby places
-    checkAndAnnounceNearbyPlaces();
+    // Walking navigation and the address for "where am I?". (The Google Places announcer is off:
+    // it used the Gemini key, which Maps rejects, and failed an HTTPS request every 30 s.)
+    {
+        double lat, lon;
+        bool fix = currentFix(lat, lon);
+        navigator.update(fix, lat, lon);
+        updateCurrentAddress(fix, lat, lon);
+    }
 
     // Check the shared hazard network and turn off any haptic motors whose pulse ended
     checkNearbyHazards();

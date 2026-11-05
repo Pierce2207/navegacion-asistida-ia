@@ -64,6 +64,20 @@ bool VisionAssistant::initialize() {
 }
 
 void VisionAssistant::run() {
+    // WiFi lost for a while (e.g. walked out of the house): switch to the other network. The
+    // ESP32 only retries the network it was on, which never comes back once the user has left.
+    if (WiFi.status() != WL_CONNECTED) {
+        if (wifiDownSince == 0) {
+            wifiDownSince = millis();
+        } else if (millis() - wifiDownSince > WIFI_SWITCH_AFTER_MS && WIFI_SSID_2 && WIFI_SSID_2[0]) {
+            Serial.println("WiFi down for a while - trying the other network");
+            beginWiFiNetwork(1 - wifiNetwork);
+            wifiDownSince = millis();  // give it the same time before switching back
+        }
+    } else {
+        wifiDownSince = 0;
+    }
+
     // Handle WebSocket communication
     ws.loop();
 
@@ -250,6 +264,14 @@ void VisionAssistant::processFrame() {
         Serial.println("GPS data not available or not recent");
     }
 
+    if (currentAddress.length() > 0 && gpsData.isValid && gps.hasValidFix()) {
+        // Escaped like the rest of the frame text: it goes into a JSON string
+        String address = currentAddress;
+        address.replace("\\", "\\\\");
+        address.replace("\"", "\\\"");
+        gpsText += "Current address: " + address + ". ";
+    }
+
     // Local time (NTP, see connectToWiFi); timeout 0 so a not-yet-synced clock just skips it
     struct tm now;
     if (getLocalTime(&now, 0)) {
@@ -299,6 +321,24 @@ bool VisionAssistant::isSetupComplete() const {
     return setupComplete;
 }
 
+// Starts connecting to network 0 (WIFI_SSID) or 1 (WIFI_SSID_2). False if that one isn't configured.
+bool VisionAssistant::beginWiFiNetwork(int n) {
+    const char* ssid = (n == 0) ? WIFI_SSID : WIFI_SSID_2;
+    const char* pass = (n == 0) ? WIFI_PASSWORD : WIFI_PASSWORD_2;
+    if (!ssid || !ssid[0]) {
+        return false;
+    }
+    WiFi.disconnect();
+    WiFi.begin(ssid, pass);
+    // 13 dBm instead of the 19.5 dBm default/maximum: the full-power current spikes dipped the
+    // ESP32-CAM's supply and the link dropped right at the first TLS handshake, even with -40 dBm
+    // signal. 13 dBm is plenty for a nearby router or the user's phone hotspot.
+    WiFi.setTxPower(WIFI_POWER_13dBm);
+    wifiNetwork = n;
+    Serial.printf("\nConnecting to WiFi %s", ssid);
+    return true;
+}
+
 bool VisionAssistant::connectToWiFi() {
     // Log the router's disconnect reason: "status 6" alone doesn't say whether it was the password
     static bool reasonLoggerAdded = false;
@@ -316,19 +356,18 @@ bool VisionAssistant::connectToWiFi() {
         }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     }
 
+    // Home network first, then the phone hotspot (WIFI_SSID_2) for when the user is outside
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    // 13 dBm instead of the 19.5 dBm default/maximum: the full-power current spikes dipped the
-    // ESP32-CAM's supply and the link dropped right at the first TLS handshake, even with -40 dBm
-    // signal. 13 dBm is plenty for a nearby router or the user's phone hotspot.
-    WiFi.setTxPower(WIFI_POWER_13dBm);
-    Serial.print("Connecting to WiFi");
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
+    for (int n = 0; n < 2 && WiFi.status() != WL_CONNECTED; n++) {
+        if (!beginWiFiNetwork(n)) {
+            continue;
+        }
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+            delay(500);
+            Serial.print(".");
+            attempts++;
+        }
     }
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -344,7 +383,7 @@ bool VisionAssistant::connectToWiFi() {
         Serial.printf("Visible 2.4 GHz networks (%d):\n", n);
         for (int i = 0; i < n; i++) {
             Serial.printf("  %s (%d dBm)%s\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i),
-                          WiFi.SSID(i) == WIFI_SSID ? "  <- configured" : "");
+                          (WiFi.SSID(i) == WIFI_SSID || WiFi.SSID(i) == WIFI_SSID_2) ? "  <- configured" : "");
         }
         WiFi.scanDelete();
         return false;
@@ -495,6 +534,15 @@ void VisionAssistant::handleWebSocketMessage(const JsonDocument &doc) {
                         // Send tool response back to Gemini
                         sendToolResponse(toolId, toolName, "System action processed successfully");
                     }
+                } else if (toolName && toolCallback) {
+                    // getDirections, stopNavigation... Every call needs a response or Gemini's turn
+                    // never completes (they used to be dropped here). The firmware does the work and
+                    // speaks the result itself.
+                    String argsJson;
+                    serializeJson(funcCall["args"], argsJson);
+                    Serial.printf("Tool call: %s(%s)\n", toolName, argsJson.c_str());
+                    toolCallback(toolName, argsJson);
+                    sendToolResponse(toolId, toolName, "Handled by the device; it tells the user the result.");
                 }
             }
         } else {

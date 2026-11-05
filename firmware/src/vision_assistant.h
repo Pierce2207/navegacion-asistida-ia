@@ -42,6 +42,13 @@ private:
     // User's language from the app settings; Gemini writes spoken messages in it
     String responseLanguage;
 
+    String currentAddress;
+
+    // Which network we're on (0 = WIFI_SSID, 1 = WIFI_SSID_2) and since when the link is down
+    int wifiNetwork = 0;
+    unsigned long wifiDownSince = 0;
+    static const unsigned long WIFI_SWITCH_AFTER_MS = 20000;
+
     // When a frame carried a user voice command, hold further frames until Gemini answers:
     // each frame is a complete turn, and a new turn interrupts the reply to the previous one
     volatile unsigned long awaitingCommandReplySince = 0;  // 0 = not waiting
@@ -108,6 +115,10 @@ public:
     // Must be set before the WebSocket connects (it goes into the setup message)
     void setResponseLanguage(const String& language);
 
+    // Street address for the current GPS fix (main loop looks it up), sent with every frame so
+    // Gemini can answer "where am I?"
+    void setCurrentAddress(const String& address) { currentAddress = address; }
+
     // A user command is queued, being spoken or sent, and Gemini hasn't answered it yet
     bool isAwaitingCommandReply() const { return commandPendingSince != 0 || queueSize > 0 || voiceCommandActive; }
 
@@ -170,6 +181,7 @@ public:
 private:
     // Internal helper methods
     bool connectToWiFi();
+    bool beginWiFiNetwork(int n);
     bool initializeCamera();
     bool initializeGPS();
     bool initializeWebSocket();

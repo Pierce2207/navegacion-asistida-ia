@@ -55,6 +55,11 @@ USER VOICE COMMANDS/QUERIES (intent=voice_query):
   * 'Where did I put my wallet?' -> Call 'systemAction' with intent='voice_query', shouldSpeak=true, message='You put your wallet [location if known, or I do not have that information stored].'
   * 'Where is the nearest park?' -> Call 'getDirections' with destination='nearest park'.
 
+NAVIGATION:
+- 'Take me to X', 'How do I get to X', 'Llévame a X', 'Quiero ir a X' -> Call 'getDirections' with destination=X exactly as the user named it (keep their language). The device computes a walking route and speaks every turn by itself while the user walks: do NOT give turn-by-turn directions yourself.
+- 'Stop', 'Cancel the route', 'Cancela la ruta', 'Ya no quiero ir' -> Call 'stopNavigation'.
+- 'Where am I?', '¿Dónde estoy?' -> answer with intent=voice_query using the 'Current address' text sent with the latest frame. If there is no address, say the GPS has no signal yet (it needs open sky).
+
 FALLS & EMERGENCIES (intent=emergency_protocol):
 - Fall detected: Call 'systemAction' with intent='emergency_protocol', shouldSpeak=true, message='Fall detected. Are you okay? Contacting your companion.'
 - Medical emergency: Call 'systemAction' with intent='emergency_protocol', shouldSpeak=true, message='Medical emergency detected. Getting help.'
@@ -104,7 +109,7 @@ const char* const TOOLS_JSON = R"({
     },
     {
       "name": "getDirections",
-      "description": "Get directions to a destination.",
+      "description": "Start walking navigation to a destination. The device finds the place near the user, computes a walking route and speaks each turn as the user walks.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -114,6 +119,14 @@ const char* const TOOLS_JSON = R"({
           }
         },
         "required": ["destination"]
+      }
+    },
+    {
+      "name": "stopNavigation",
+      "description": "Stop the walking navigation in progress.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
       }
     }
   ]
