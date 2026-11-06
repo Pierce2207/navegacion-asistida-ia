@@ -75,7 +75,7 @@ app.get("/settings", async (req, res) => {
     if (!data) {
       const defaultSettings = {
         unique_device_id: deviceId,
-        language: 'en-US',
+        language: 'es',
         volume: 90,
         speech_mode: 'verbose',
         alert_types_enabled: ['all'],
@@ -86,7 +86,7 @@ app.get("/settings", async (req, res) => {
         emergency_contacts: [],
         button_press_behavior: 'send_alert',
         device_name: '',
-        wake_word: 'Halo',
+        wake_word: 'Visión',
         fetch_interval: 300,
         vibration_enabled: true,
         haptic_pattern: 'pulse',

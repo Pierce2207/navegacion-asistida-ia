@@ -35,8 +35,8 @@ type DeviceSettings = {
 // Mirrors the API's /settings defaults for the fields this screen edits.
 const DEFAULT_SETTINGS: DeviceSettings = {
   device_name: '',
-  wake_word: 'Hey Sentra',
-  language: 'en-US',
+  wake_word: 'Visión',
+  language: 'es',
   volume: 100,
   danger_sensitivity: 'medium',
   button_press_behavior: 'confirm_safe',
@@ -49,25 +49,25 @@ const DEFAULT_SETTINGS: DeviceSettings = {
 type Option<T> = { label: string; value: T };
 
 const LANGUAGE_OPTIONS: Option<string>[] = [
-  { label: 'English (US)', value: 'en-US' },
   // Plain 'es' (not es-PE/es-ES): it's what Deepgram STT expects as its language param
   { label: 'Español', value: 'es' },
-  { label: 'Chinese (Simplified)', value: 'zh-CN' },
+  { label: 'Inglés (EE. UU.)', value: 'en-US' },
+  { label: 'Chino (simplificado)', value: 'zh-CN' },
 ];
 
 const SENSITIVITY_OPTIONS: Option<string>[] = [
-  { label: 'Low', value: 'low' },
-  { label: 'Medium', value: 'medium' },
-  { label: 'High', value: 'high' },
+  { label: 'Baja', value: 'low' },
+  { label: 'Media', value: 'medium' },
+  { label: 'Alta', value: 'high' },
 ];
 
 const BUTTON_BEHAVIOR_OPTIONS: Option<string>[] = [
-  { label: 'Send Alert', value: 'send_alert' },
-  { label: 'Confirm Safe', value: 'confirm_safe' },
+  { label: 'Enviar alerta', value: 'send_alert' },
+  { label: 'Confirmar que estoy bien', value: 'confirm_safe' },
 ];
 
 const TIMEOUT_OPTIONS: Option<number>[] = [5, 10, 15, 30, 60].map((seconds) => ({
-  label: `${seconds} seconds`,
+  label: `${seconds} segundos`,
   value: seconds,
 }));
 
@@ -189,14 +189,14 @@ function VolumeSlider({ value, onChange }: { value: number; onChange: (value: nu
 
   return (
     <View style={styles.field}>
-      <Text style={styles.fieldLabel}>Volume: {value}%</Text>
+      <Text style={styles.fieldLabel}>Volumen: {value}%</Text>
       <View
         style={styles.sliderTouchArea}
         onLayout={(event) => {
           trackWidth.current = event.nativeEvent.layout.width;
         }}
         accessibilityRole="adjustable"
-        accessibilityLabel="Volume"
+        accessibilityLabel="Volumen"
         accessibilityValue={{ min: 0, max: 100, now: value, text: `${value}%` }}
         accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
         onAccessibilityAction={(event) => {
@@ -221,14 +221,14 @@ function VolumeSlider({ value, onChange }: { value: number; onChange: (value: nu
           style={styles.stepperButton}
           onPress={() => onChange(clampVolume(value - 10))}
           accessibilityRole="button"
-          accessibilityLabel="Decrease volume by 10 percent">
+          accessibilityLabel="Bajar el volumen 10 por ciento">
           <Text style={styles.stepperText}>- 10%</Text>
         </Pressable>
         <Pressable
           style={styles.stepperButton}
           onPress={() => onChange(clampVolume(value + 10))}
           accessibilityRole="button"
-          accessibilityLabel="Increase volume by 10 percent">
+          accessibilityLabel="Subir el volumen 10 por ciento">
           <Text style={styles.stepperText}>+ 10%</Text>
         </Pressable>
       </View>
@@ -275,7 +275,7 @@ export default function SettingsScreen() {
         `${getApiBaseUrl()}/settings?device_id=${encodeURIComponent(COMPANION_DEVICE_ID)}`
       );
       if (!response.ok) {
-        throw new Error(`Failed to fetch settings (${response.status})`);
+        throw new Error(`No se pudieron cargar los ajustes (error ${response.status})`);
       }
       const data = await response.json();
       setSettings({
@@ -292,7 +292,7 @@ export default function SettingsScreen() {
         vibration_enabled: data.vibration_enabled ?? DEFAULT_SETTINGS.vibration_enabled,
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load settings');
+      setError(e instanceof Error ? e.message : 'No se pudieron cargar los ajustes');
     } finally {
       setLoading(false);
     }
@@ -312,11 +312,11 @@ export default function SettingsScreen() {
         body: JSON.stringify({ device_id: COMPANION_DEVICE_ID, ...settings }),
       });
       if (!response.ok) {
-        throw new Error(`Failed to save settings (${response.status})`);
+        throw new Error(`No se pudieron guardar los ajustes (error ${response.status})`);
       }
-      Alert.alert('Settings Saved', 'Device settings have been updated.');
+      Alert.alert('Ajustes guardados', 'Los ajustes del dispositivo se actualizaron.');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save settings');
+      setError(e instanceof Error ? e.message : 'No se pudieron guardar los ajustes');
     } finally {
       setSaving(false);
     }
@@ -324,7 +324,7 @@ export default function SettingsScreen() {
 
   return (
     <View style={styles.container}>
-      <ScreenHeader title="Device Settings" subtitle="Configure Device behavior" />
+      <ScreenHeader title="Ajustes del dispositivo" subtitle="Configura cómo funciona el aparato" />
       <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
         {error ? (
           <View style={styles.errorBanner} accessibilityRole="alert">
@@ -335,60 +335,60 @@ export default function SettingsScreen() {
           <ActivityIndicator color={HaloColors.blue} style={styles.loader} />
         ) : (
           <>
-            <Section title="Device Configuration">
+            <Section title="Dispositivo">
               <LabeledInput
-                label="Device Name"
+                label="Nombre del dispositivo"
                 value={settings.device_name}
                 onChangeText={(text) => update('device_name', text)}
               />
               <LabeledInput
-                label="Wake Word"
+                label="Palabra de activación"
                 value={settings.wake_word}
                 onChangeText={(text) => update('wake_word', text)}
               />
             </Section>
-            <Section title="Language & Speech">
+            <Section title="Idioma y voz">
               <Dropdown
-                label="Language"
+                label="Idioma"
                 value={settings.language}
                 options={LANGUAGE_OPTIONS}
                 onChange={(value) => update('language', value)}
               />
               <VolumeSlider value={settings.volume} onChange={(value) => update('volume', value)} />
             </Section>
-            <Section title="Alert Configuration">
+            <Section title="Alertas">
               <Dropdown
-                label="Danger Sensitivity"
+                label="Sensibilidad a peligros"
                 value={settings.danger_sensitivity}
                 options={SENSITIVITY_OPTIONS}
                 onChange={(value) => update('danger_sensitivity', value)}
               />
               <Dropdown
-                label="Emergency Button Behavior"
+                label="Botón de emergencia"
                 value={settings.button_press_behavior}
                 options={BUTTON_BEHAVIOR_OPTIONS}
                 onChange={(value) => update('button_press_behavior', value)}
               />
               <Dropdown
-                label="Auto Distress Timeout"
+                label="Tiempo para alerta automática"
                 value={settings.auto_distress_timeout}
                 options={TIMEOUT_OPTIONS}
                 onChange={(value) => update('auto_distress_timeout', value)}
               />
             </Section>
-            <Section title="Features">
+            <Section title="Funciones">
               <ToggleRow
-                label="Notify Companion"
+                label="Avisar al acompañante"
                 value={settings.notify_companion}
                 onChange={(value) => update('notify_companion', value)}
               />
               <ToggleRow
-                label="Location Sharing"
+                label="Compartir ubicación"
                 value={settings.location_sharing_enabled}
                 onChange={(value) => update('location_sharing_enabled', value)}
               />
               <ToggleRow
-                label="Vibration Feedback"
+                label="Vibración"
                 value={settings.vibration_enabled}
                 onChange={(value) => update('vibration_enabled', value)}
               />
@@ -398,24 +398,24 @@ export default function SettingsScreen() {
               onPress={saveSettings}
               disabled={saving}
               accessibilityRole="button"
-              accessibilityLabel="Save Settings">
+              accessibilityLabel="Guardar ajustes">
               <Text style={styles.buttonPrimaryText}>
-                {saving ? 'Saving…' : 'Save Settings'}
+                {saving ? 'Guardando…' : 'Guardar ajustes'}
               </Text>
             </Pressable>
             <Pressable
               style={[styles.button, styles.buttonOutlineRed]}
               onPress={() => setSettings(DEFAULT_SETTINGS)}
               accessibilityRole="button"
-              accessibilityLabel="Reset to Defaults">
-              <Text style={styles.buttonOutlineRedText}>Reset to Defaults</Text>
+              accessibilityLabel="Restablecer valores">
+              <Text style={styles.buttonOutlineRedText}>Restablecer valores</Text>
             </Pressable>
             <Pressable
               style={[styles.button, styles.buttonOutlineBlue]}
               onPress={loadSettings}
               accessibilityRole="button"
-              accessibilityLabel="Refresh Settings">
-              <Text style={styles.buttonOutlineBlueText}>Refresh Settings</Text>
+              accessibilityLabel="Volver a cargar">
+              <Text style={styles.buttonOutlineBlueText}>Volver a cargar</Text>
             </Pressable>
           </>
         )}

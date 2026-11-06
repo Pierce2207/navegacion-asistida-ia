@@ -32,10 +32,24 @@ const PRIORITY_COLORS: Record<string, string> = {
 
 // Alert types other than 'help' share the same payload shape.
 const TYPE_INFO: Record<string, { emoji: string; title: string; noun: string }> = {
-  help: { emoji: '🤝', title: 'HELP NEEDED', noun: 'help alert' },
-  fall: { emoji: '⚠️', title: 'FALL DETECTED', noun: 'fall alert' },
-  sos: { emoji: '🆘', title: 'SOS', noun: 'SOS alert' },
-  emergency: { emoji: '🚨', title: 'EMERGENCY', noun: 'emergency alert' },
+  help: { emoji: '🤝', title: 'NECESITA AYUDA', noun: 'alerta de ayuda' },
+  fall: { emoji: '⚠️', title: 'CAÍDA DETECTADA', noun: 'alerta de caída' },
+  sos: { emoji: '🆘', title: 'SOS', noun: 'alerta SOS' },
+  emergency: { emoji: '🚨', title: 'EMERGENCIA', noun: 'alerta de emergencia' },
+};
+
+// The database stores these in English; only what the user sees is translated
+const STATUS_LABELS: Record<string, string> = {
+  active: 'ACTIVA',
+  acknowledged: 'ATENDIDA',
+  resolved: 'RESUELTA',
+};
+
+const PRIORITY_LABELS: Record<string, string> = {
+  low: 'BAJA',
+  medium: 'MEDIA',
+  high: 'ALTA',
+  critical: 'CRÍTICA',
 };
 
 function alertTypeInfo(type: string | null) {
@@ -45,13 +59,20 @@ function alertTypeInfo(type: string | null) {
   const readable = type ? type.replace(/_/g, ' ') : null;
   return {
     emoji: '⚠️',
-    title: readable ? readable.toUpperCase() : 'ALERT',
-    noun: readable ? `${readable} alert` : 'alert',
+    title: readable ? readable.toUpperCase() : 'ALERTA',
+    noun: readable ? `alerta de ${readable}` : 'alerta',
   };
 }
 
 function statusLabel(status: string | null) {
-  return (status ?? 'unknown').replace(/_/g, ' ').toUpperCase();
+  return STATUS_LABELS[status ?? ''] ?? (status ?? 'desconocido').replace(/_/g, ' ').toUpperCase();
+}
+
+function priorityLabel(priority: string | null) {
+  if (!priority) {
+    return undefined;
+  }
+  return PRIORITY_LABELS[priority] ?? priority.toUpperCase();
 }
 
 function statusColor(status: string | null) {
@@ -77,7 +98,8 @@ function formatTimestamp(iso: string) {
   const meridiem = hours < 12 ? 'a.m.' : 'p.m.';
   return {
     time: `${twelveHour}:${pad(date.getMinutes())} ${meridiem}`,
-    date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    // día/mes/año, como se escribe en Perú
+    date: `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`,
   };
 }
 
@@ -170,7 +192,7 @@ export default function HomeScreen() {
         .single();
       if (updateError) {
         upsertAlert(alert);
-        Alert.alert('Update Failed', `The alert was not updated: ${updateError.message}`);
+        Alert.alert('No se pudo actualizar', `La alerta no se actualizó: ${updateError.message}`);
         return;
       }
       upsertAlert(data);
@@ -186,13 +208,13 @@ export default function HomeScreen() {
     const { time, date } = formatTimestamp(alertTimeValue(item));
     const { emoji, title } = alertTypeInfo(item.type);
     const status = statusLabel(item.status);
-    const priority = item.priority?.toUpperCase();
+    const priority = priorityLabel(item.priority);
     const accessibilityLabel = [
       title,
       status,
-      priority && `priority ${priority}`,
+      priority && `prioridad ${priority}`,
       time && `${time} ${date}`,
-      item.location && `at ${item.location}`,
+      item.location && `en ${item.location}`,
     ]
       .filter(Boolean)
       .join(', ');
@@ -203,7 +225,7 @@ export default function HomeScreen() {
         onPress={() => setSelected(item)}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel}
-        accessibilityHint="Opens alert actions">
+        accessibilityHint="Abre las acciones de la alerta">
         <View style={styles.alertHeader}>
           <Text style={styles.alertTitle}>{emoji} {title}</Text>
           <View>
@@ -231,13 +253,15 @@ export default function HomeScreen() {
     );
   };
 
-  const dialogNoun = selected ? alertTypeInfo(selected.type).noun : 'alert';
+  const dialogNoun = selected ? alertTypeInfo(selected.type).noun : 'alerta';
 
   return (
     <View style={styles.container}>
       <ScreenHeader
-        title="Emergency Alerts"
-        subtitle={`${activeCount} Active • ${acknowledgedCount} Acknowledged`}
+        title="Alertas de emergencia"
+        subtitle={`${activeCount} ${activeCount === 1 ? 'activa' : 'activas'} • ${acknowledgedCount} ${
+          acknowledgedCount === 1 ? 'atendida' : 'atendidas'
+        }`}
       />
       {loading ? (
         <ActivityIndicator color={HaloColors.blue} style={styles.loader} />
@@ -255,12 +279,12 @@ export default function HomeScreen() {
                   <Text style={styles.errorText}>{error}</Text>
                 </View>
               ) : null}
-              <StatCard count={activeCount} label="Active Alerts" color={HaloColors.red} />
-              <StatCard count={acknowledgedCount} label="Acknowledged" color={HaloColors.orange} />
-              <StatCard count={resolvedCount} label="Resolved" color={HaloColors.green} />
+              <StatCard count={activeCount} label="Alertas activas" color={HaloColors.red} />
+              <StatCard count={acknowledgedCount} label="Atendidas" color={HaloColors.orange} />
+              <StatCard count={resolvedCount} label="Resueltas" color={HaloColors.green} />
             </>
           }
-          ListEmptyComponent={<Text style={styles.emptyText}>No alerts yet.</Text>}
+          ListEmptyComponent={<Text style={styles.emptyText}>Todavía no hay alertas.</Text>}
         />
       )}
       <Modal
@@ -271,32 +295,32 @@ export default function HomeScreen() {
         <Pressable style={styles.dialogBackdrop} onPress={() => setSelected(null)}>
           <View style={styles.dialog}>
             <Text style={styles.dialogTitle} accessibilityRole="header">
-              Alert Actions
+              Acciones de la alerta
             </Text>
             <Text style={styles.dialogBody}>
-              What would you like to do with this {dialogNoun}?
+              ¿Qué quieres hacer con esta {dialogNoun}?
             </Text>
             <View style={styles.dialogActions}>
               <Pressable
                 style={styles.dialogButton}
                 onPress={() => setSelected(null)}
                 accessibilityRole="button"
-                accessibilityLabel="Cancel">
-                <Text style={styles.dialogButtonText}>CANCEL</Text>
+                accessibilityLabel="Cancelar">
+                <Text style={styles.dialogButtonText}>CANCELAR</Text>
               </Pressable>
               <Pressable
                 style={styles.dialogButton}
                 onPress={() => selected && updateStatus(selected, 'resolved')}
                 accessibilityRole="button"
-                accessibilityLabel="Mark as resolved">
-                <Text style={styles.dialogButtonText}>MARK AS RESOLVED</Text>
+                accessibilityLabel="Marcar como resuelta">
+                <Text style={styles.dialogButtonText}>MARCAR COMO RESUELTA</Text>
               </Pressable>
               <Pressable
                 style={styles.dialogButton}
                 onPress={() => selected && updateStatus(selected, 'acknowledged')}
                 accessibilityRole="button"
-                accessibilityLabel="Acknowledge alert">
-                <Text style={styles.dialogButtonText}>ACKNOWLEDGE ALERT</Text>
+                accessibilityLabel="Marcar como atendida">
+                <Text style={styles.dialogButtonText}>MARCAR COMO ATENDIDA</Text>
               </Pressable>
             </View>
           </View>

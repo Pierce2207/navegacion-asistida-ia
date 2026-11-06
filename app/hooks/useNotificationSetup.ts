@@ -34,7 +34,7 @@ export default function useNotificationSetup() {
   useEffect(() => {
     notifee.createChannel({
       id: 'messages',
-      name: 'Emergency alerts',
+      name: 'Alertas de emergencia',
       lights: false,
       vibration: true,
       bypassDnd: true,

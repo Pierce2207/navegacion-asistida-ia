@@ -333,26 +333,26 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     } else {
         locationObj["latitude"] = nullptr;
         locationObj["longitude"] = nullptr;
-        locationObj["address"] = "Location unavailable";
+        locationObj["address"] = "Ubicación no disponible";
     }
     
     // Determine appropriate title and message based on alert type
     String title, message;
     if (alertType == "fall_detection") {
-        title = "Emergency Alert - Fall Detected";
-        message = description.isEmpty() ? "Fall detected by wearable device sensors" : description;
+        title = "Alerta: caída detectada";
+        message = description.isEmpty() ? "Se detectó una caída" : description;
     } else if (alertType == "medical_emergency") {
-        title = "Medical Emergency Alert";
-        message = description.isEmpty() ? "Medical emergency detected" : description;
+        title = "Alerta: emergencia médica";
+        message = description.isEmpty() ? "Se detectó una emergencia médica" : description;
     } else if (alertType == "panic_button") {
-        title = "Panic Alert";
-        message = description.isEmpty() ? "Panic button activated by user" : description;
+        title = "SOS: necesita ayuda";
+        message = description.isEmpty() ? "El usuario presionó el botón de emergencia" : description;
     } else if (alertType == "lost_device") {
-        title = "Device Location Alert";
-        message = description.isEmpty() ? "Device location tracking activated" : description;
+        title = "Alerta: ubicación del dispositivo";
+        message = description.isEmpty() ? "Se activó el seguimiento de ubicación" : description;
     } else {
-        title = "Safety Alert";
-        message = description.isEmpty() ? "Emergency situation detected" : description;
+        title = "Alerta de seguridad";
+        message = description.isEmpty() ? "Se detectó una situación de emergencia" : description;
     }
     
     // Create notification JSON in the specified format
@@ -1460,7 +1460,7 @@ void handleButton() {
     hapticsDirection(HazardDirection::LEFT, 800);
     hapticsDirection(HazardDirection::CENTER, 800);
     hapticsDirection(HazardDirection::RIGHT, 800);
-    sendEmergencyAlert("panic_button", "SOS: el usuario presiono el boton de emergencia 5 veces.");
+    sendEmergencyAlert("panic_button", "SOS: el usuario presionó el botón de emergencia 5 veces.");
 }
 
 void checkAndAnnounceNearbyPlaces() {
