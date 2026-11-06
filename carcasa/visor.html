@@ -1,0 +1,309 @@
+<title>Carcasa MURDOCK</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: banco de trabajo — visor 3D grande arriba con sus controles, ficha técnica de impresión debajo en dos columnas */
+:root {
+  --bg: #eef1ef;
+  --panel: #ffffff;
+  --fg: #17201c;
+  --muted: #5a6760;
+  --line: #d3dad5;
+  --accent: #1f5c45;        /* mismo verde que el render del modelo */
+  --accent-soft: #dcebe4;
+  --stage: #dfe5e1;         /* fondo del visor */
+  --font-display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111613; --panel: #19201c; --fg: #e5ebe7; --muted: #9aa8a0; --line: #2b352f;
+    --accent: #7fd1a8; --accent-soft: #1f3a2e; --stage: #0c100e; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111613; --panel: #19201c; --fg: #e5ebe7; --muted: #9aa8a0; --line: #2b352f;
+  --accent: #7fd1a8; --accent-soft: #1f3a2e; --stage: #0c100e; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body);
+  font-size: 15.5px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 56px;
+}
+.wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 28px; }
+header { display: grid; gap: 6px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(30px, 5vw, 44px); line-height: 1.05; margin: 0; letter-spacing: .01em; text-wrap: balance; }
+h2 { font-family: var(--font-display); font-weight: 700; font-size: 22px; margin: 0; letter-spacing: .01em; }
+p { margin: 0; }
+.lead { color: var(--muted); max-width: 68ch; }
+.specs { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--font-mono); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.specs b { color: var(--fg); font-weight: 500; }
+
+.viewer { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: grid; }
+.stage { position: relative; width: 100%; aspect-ratio: 16 / 10; max-height: 70vh; background: var(--stage); touch-action: none; }
+.stage canvas { display: block; width: 100%; height: 100%; }
+.status { position: absolute; inset: auto 12px 12px 12px; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); pointer-events: none; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding: 12px 14px; border-top: 1px solid var(--line); }
+.views { display: flex; flex-wrap: wrap; gap: 6px; }
+button.view {
+  font: 500 14px var(--font-body); color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 12px; cursor: pointer;
+}
+button.view:hover { border-color: var(--accent); }
+button.view[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--fg); }
+button.view:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slider { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); flex: 1 1 260px; min-width: 0; }
+.slider input { flex: 1; accent-color: var(--accent); min-width: 0; }
+.slider output { font-family: var(--font-mono); font-size: 13px; color: var(--fg); min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); }
+.check input { accent-color: var(--accent); }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+.cols > * { min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 12px; align-content: start; }
+ul, ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+td.num { font-family: var(--font-mono); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+code { font-family: var(--font-mono); font-size: .9em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+footer { color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Carcasa para impresión 3D · 2 piezas</div>
+    <h1>MURDOCK</h1>
+    <p class="lead">Caja de pecho para el asistente de navegación. Gira el modelo con el mouse o el dedo, acerca con la rueda o pellizcando, y desliza la tapa para ver cómo se abre.</p>
+    <div class="specs">
+      <span>Exterior <b>102 × 110 × 52 mm</b></span>
+      <span>Tapa <b>98 × 108 mm</b></span>
+      <span>Material <b>PETG</b></span>
+      <span>Plástico <b>~160 g</b></span>
+    </div>
+  </header>
+
+  <section class="viewer" aria-label="Visor 3D de la carcasa">
+    <div class="stage" id="stage">
+      <div class="status" id="status">Cargando el modelo…</div>
+    </div>
+    <div class="controls">
+      <div class="views" role="group" aria-label="Vistas">
+        <button class="view" id="v-front" type="button" aria-pressed="true">Frente</button>
+        <button class="view" id="v-back" type="button" aria-pressed="false">Atrás</button>
+        <button class="view" id="v-right" type="button" aria-pressed="false">Lado derecho</button>
+        <button class="view" id="v-left" type="button" aria-pressed="false">Lado izquierdo</button>
+        <button class="view" id="v-top" type="button" aria-pressed="false">Arriba</button>
+      </div>
+      <label class="slider" for="lid">Deslizar tapa
+        <input id="lid" type="range" min="0" max="115" value="0" step="1">
+        <output id="lid-out" for="lid">0 mm</output>
+      </label>
+      <label class="check" for="show-lid"><input id="show-lid" type="checkbox" checked> Mostrar tapa</label>
+    </div>
+  </section>
+
+  <div class="cols">
+    <section class="card">
+      <h2>Dónde va cada cosa</h2>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Lugar</th><th>Qué hay</th></tr></thead>
+          <tbody>
+            <tr><td>Frente, arriba</td><td>Ventana de la cámara (14 mm, con chaflán para no recortar la imagen)</td></tr>
+            <tr><td>Frente, centro</td><td>Texto <b>MURDOCK</b> grabado 0.8 mm</td></tr>
+            <tr><td>Frente, abajo</td><td>Rejilla del parlante y agujero del micrófono, separados para que no se acople</td></tr>
+            <tr><td>Arriba</td><td>Botón (hablar / SOS); por dentro, el marco de la antena del GPS mirando al cielo</td></tr>
+            <tr><td>Lado derecho</td><td>Puerto USB-C del cargador</td></tr>
+            <tr><td>Lado izquierdo</td><td>Interruptor KCD11 y ranuras de aire del regulador</td></tr>
+            <tr><td>Abajo</td><td>Salida del cable de los 3 motores (conector JST)</td></tr>
+            <tr><td>Atrás</td><td>Tapa deslizable con traba y dos presillas para correa de 25 mm, inclinadas 8°</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="lead">Derecha e izquierda son las de la persona que lo lleva puesto.</p>
+    </section>
+
+    <section class="card">
+      <h2>Por dentro</h2>
+      <ul>
+        <li><b>Capa delantera:</b> 4 postes para la placa soldada (con la ESP32-CAM en su zócalo, la lente en la ventana), aro del parlante y aro del micrófono.</li>
+        <li><b>Capa trasera, abajo:</b> cuna para el portapilas 2×18650.</li>
+        <li><b>Estante 1:</b> regulador LM2596 (izquierda, junto a las ranuras de aire) y cargador USB-C (derecha).</li>
+        <li><b>Estante 2:</b> BMS, amplificador MAX98357A y placa del GPS.</li>
+        <li>Los estantes tienen ventanas para pasar los cables entre capas. Los módulos sin agujeros se fijan con una gota de silicona caliente.</li>
+      </ul>
+      <h2>Cómo se cierra</h2>
+      <p>La tapa entra desde arriba por las ranuras de los costados. Al final, el diente de la lengüeta pasa bajo el borde superior y hace clic. Para abrirla, empuja la lengüeta hacia afuera y desliza la tapa hacia arriba. No lleva tornillos.</p>
+    </section>
+
+    <section class="card">
+      <h2>Para imprimir</h2>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Ajuste</th><th>Valor</th></tr></thead>
+          <tbody>
+            <tr><td>Material</td><td>PETG (el PLA se deforma al sol y su traba se rompe)</td></tr>
+            <tr><td>Capa</td><td class="num">0.2 mm</td></tr>
+            <tr><td>Perímetros</td><td class="num">3</td></tr>
+            <tr><td>Relleno</td><td class="num">20 %</td></tr>
+            <tr><td>Frente</td><td>Con la cara frontal (MURDOCK) apoyada en la cama. Sin soportes.</td></tr>
+            <tr><td>Tapa</td><td>Con la cara lisa en la cama, presillas hacia arriba. Sin soportes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Si la tapa queda dura, sube <code>HOLGURA</code> de 0.3 a 0.4 mm y vuelve a generar el STL.</p>
+    </section>
+
+    <section class="card">
+      <h2>Antes de imprimir, medir</h2>
+      <p>El modelo usa las medidas estándar de cada módulo. Mide los tuyos con regla o vernier y cambia los números en <code>carcasa/murdock_carcasa.py</code>:</p>
+      <ul>
+        <li><b>Portapilas</b> (largo, alto, grosor): <code>PORTAPILAS_*</code>, ahora 77 × 41 × 21 mm.</li>
+        <li><b>Parlante</b> (diámetro): <code>PARLANTE_DIAM</code>, ahora 40 mm.</li>
+        <li><b>Placa soldada</b> y sus agujeros: <code>PLACA_*</code>, ahora 70 × 50 mm.</li>
+        <li><b>Lente de la cámara</b> (altura desde el piso interior): <code>CAMARA_Y</code>, ahora 88 mm.</li>
+        <li><b>Altura</b> zócalo + ESP32-CAM + cámara: <code>PLACA_SEPARACION</code>, ahora 16 mm.</li>
+        <li><b>Interruptor</b>: <code>INTERRUPTOR_*</code>, ahora 19.2 × 13 mm.</li>
+      </ul>
+      <p>Luego: <code>python murdock_carcasa.py</code> genera los dos STL de nuevo.</p>
+    </section>
+  </div>
+
+  <footer>Archivos en el repositorio: <code>carcasa/murdock_frente.stl</code> y <code>carcasa/murdock_tapa.stl</code>. Diseño paramétrico en <code>carcasa/murdock_carcasa.py</code>.</footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function () {
+  const stage = document.getElementById('stage');
+  const status = document.getElementById('status');
+  if (!window.THREE || !THREE.OrbitControls) {
+    status.textContent = 'No se pudo cargar el visor 3D. Abre los STL con el Visor 3D de Windows o tu programa de impresión.';
+    return;
+  }
+  const Z_TAPA = 48.8;            // donde va la tapa (PARED + INT_FONDO)
+  const CENTRO = new THREE.Vector3(0, 52, 26);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  stage.prepend(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(32, 1.6, 1, 2000);
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.copy(CENTRO);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.12;
+  controls.minDistance = 120;
+  controls.maxDistance = 700;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a948f, 0.75));
+  const key = new THREE.DirectionalLight(0xffffff, 0.75);
+  key.position.set(-120, 180, -220);
+  scene.add(key);
+  const rim = new THREE.DirectionalLight(0xffffff, 0.45);
+  rim.position.set(160, 80, 260);
+  scene.add(rim);
+
+  const matFrente = new THREE.MeshStandardMaterial({ color: 0x2c6b52, roughness: 0.55, metalness: 0.05 });
+  const matTapa = new THREE.MeshStandardMaterial({ color: 0x9aa3a8, roughness: 0.6, metalness: 0.05 });
+
+  let tapa = null;
+  let pendientes = 2;
+  // Las mallas vienen de los STL convertidos a JSON (posiciones de los triángulos, en mm)
+  function cargar(url, ok) {
+    fetch(url).then(function (r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    }).then(function (d) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(d.p, 3));
+      geo.computeVertexNormals();
+      ok(geo);
+    }).catch(falla);
+  }
+  function listo() {
+    pendientes -= 1;
+    if (pendientes === 0) { status.hidden = true; }
+  }
+  function falla() {
+    status.textContent = 'No se pudo cargar el modelo. Recarga la página.';
+  }
+  cargar('frente.json', function (geo) {
+    scene.add(new THREE.Mesh(geo, matFrente));
+    listo();
+  });
+  cargar('tapa.json', function (geo) {
+    tapa = new THREE.Mesh(geo, matTapa);
+    tapa.position.z = Z_TAPA;
+    tapa.visible = document.getElementById('show-lid').checked;
+    aplicarTapa();
+    scene.add(tapa);
+    listo();
+  });
+
+  // Vistas (la cara frontal mira hacia -z; +x es la derecha de quien lo lleva puesto)
+  const VISTAS = {
+    'v-front': [-150, 150, -330],
+    'v-back': [150, 140, 360],
+    'v-right': [360, 120, -40],
+    'v-left': [-360, 120, 60],
+    'v-top': [-60, 380, -120],
+  };
+  function irA(id) {
+    const p = VISTAS[id];
+    camera.position.set(p[0], p[1], p[2]);
+    controls.target.copy(CENTRO);
+    controls.update();
+    Object.keys(VISTAS).forEach(function (k) {
+      document.getElementById(k).setAttribute('aria-pressed', k === id ? 'true' : 'false');
+    });
+  }
+  Object.keys(VISTAS).forEach(function (k) {
+    document.getElementById(k).addEventListener('click', function () { irA(k); });
+  });
+  controls.addEventListener('start', function () {
+    Object.keys(VISTAS).forEach(function (k) { document.getElementById(k).setAttribute('aria-pressed', 'false'); });
+  });
+  irA('v-front');
+
+  const lid = document.getElementById('lid');
+  const lidOut = document.getElementById('lid-out');
+  function aplicarTapa() {
+    lidOut.textContent = lid.value + ' mm';
+    if (tapa) { tapa.position.y = Number(lid.value); }
+  }
+  lid.addEventListener('input', aplicarTapa);
+  document.getElementById('show-lid').addEventListener('change', function (e) {
+    if (tapa) { tapa.visible = e.target.checked; }
+  });
+
+  function ajustar() {
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(ajustar).observe(stage);
+  ajustar();
+
+  (function bucle() {
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(bucle);
+  })();
+})();
+</script>
