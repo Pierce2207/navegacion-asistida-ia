@@ -1,0 +1,462 @@
+<title>Halo+ Visión · Conexiones</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: hoja técnica de taller — columna de lectura de ~70ch, tablas pin a pin y dos diagramas a ancho completo */
+:root {
+  --bg: #f6f7f4;
+  --surface: #ffffff;
+  --fg: #1b211d;
+  --muted: #5b665e;
+  --line: #d9ded7;
+  --mask: #1f5c45;      /* verde máscara de soldadura */
+  --copper: #b5651d;    /* cobre de las pistas */
+  --v5: #c2410c;        /* línea de 5 V */
+  --v33: #b45309;       /* línea de 3.3 V */
+  --gnd: #374151;       /* tierra */
+  --sig: #1d4ed8;       /* señales */
+  --warn-bg: #fff4e5;
+  --warn-fg: #7a3b00;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121714; --surface: #1a201c; --fg: #e6ebe6; --muted: #9aa69d; --line: #2d362f;
+    --mask: #6fcf9f; --copper: #e0995a; --v5: #fb8a5c; --v33: #f2b45a; --gnd: #a3adbb; --sig: #8fb0ff;
+    --warn-bg: #2b2114; --warn-fg: #f5c98a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121714; --surface: #1a201c; --fg: #e6ebe6; --muted: #9aa69d; --line: #2d362f;
+  --mask: #6fcf9f; --copper: #e0995a; --v5: #fb8a5c; --v33: #f2b45a; --gnd: #a3adbb; --sig: #8fb0ff;
+  --warn-bg: #2b2114; --warn-fg: #f5c98a; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body);
+  font-size: 15.5px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 40px; }
+.prose { max-width: 70ch; }
+header { display: grid; gap: 10px; border-bottom: 2px solid var(--mask); padding-bottom: 20px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--mask); }
+h1 { font-size: clamp(26px, 4.5vw, 36px); line-height: 1.15; margin: 0; text-wrap: balance; font-weight: 700; }
+h2 { font-size: 22px; margin: 0 0 6px; text-wrap: balance; }
+h3 { font-size: 16.5px; margin: 0; }
+p { margin: 0; }
+.lead { color: var(--muted); font-size: 16.5px; }
+section { display: grid; gap: 16px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 20px; font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+.meta b { color: var(--fg); font-weight: 500; }
+code, .pin { font-family: var(--font-mono); font-size: .92em; }
+.pin { background: color-mix(in srgb, var(--mask) 12%, transparent); color: var(--fg); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; background: color-mix(in srgb, var(--mask) 5%, var(--surface)); }
+tr:last-child td { border-bottom: 0; }
+td.mod { font-weight: 600; white-space: nowrap; }
+.net { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 13px; white-space: nowrap; }
+.net::before { content: ""; width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
+.n5 { color: var(--v5); } .n33 { color: var(--v33); } .ngnd { color: var(--gnd); } .nsig { color: var(--sig); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); }
+.warn { background: var(--warn-bg); color: var(--warn-fg); border-left: 4px solid var(--copper); padding: 12px 14px; border-radius: 6px; display: grid; gap: 6px; }
+.warn strong { color: inherit; }
+ul.checks { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.grid2 > * { min-width: 0; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 10px; align-content: start; }
+.diagram { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.diagram svg { display: block; min-width: 720px; width: 100%; height: auto; }
+svg text { font-family: var(--font-mono); }
+.cap { font-size: 13px; color: var(--muted); }
+ol.steps { margin: 0; padding-left: 22px; display: grid; gap: 8px; }
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Hoja de armado · para soldar la placa final</div>
+    <h1>Halo+ Visión: conexiones y distribución en la carcasa</h1>
+    <p class="lead prose">Todo lo que ya está probado y funcionando sobre la protoboard, pin por pin, para pasarlo a placa soldada. Si algo no coincide con lo que tienes armado, manda foto antes de soldar.</p>
+    <div class="meta">
+      <span>Placa: <b>AI-Thinker ESP32-CAM</b> (4 MB PSRAM)</span>
+      <span>Cámara: <b>OV2640</b></span>
+      <span>Expansor: <b>PCF8574 @ 0x20</b></span>
+      <span>Estado: <b>probado 5 nov 2026</b></span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Diagrama general</h2>
+    <div class="legend">
+      <span class="net n5">5 V</span><span class="net n33">3.3 V</span><span class="net ngnd">GND</span><span class="net nsig">señal</span>
+    </div>
+    <div class="diagram" role="img" aria-label="Diagrama de bloques: baterías, BMS, interruptor, regulador a 5 V, ESP32-CAM y sus módulos">
+      <svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <style>
+            .box { fill: var(--surface); stroke: var(--fg); stroke-width: 1.4; }
+            .core { fill: color-mix(in srgb, var(--mask) 10%, var(--surface)); stroke: var(--mask); stroke-width: 2; }
+            .t { fill: var(--fg); font-size: 13px; font-weight: 600; }
+            .s { fill: var(--muted); font-size: 11px; }
+            .w5 { stroke: var(--v5); stroke-width: 2.4; fill: none; }
+            .w33 { stroke: var(--v33); stroke-width: 2.4; fill: none; }
+            .wg { stroke: var(--gnd); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+            .ws { stroke: var(--sig); stroke-width: 1.8; fill: none; }
+            .l5 { fill: var(--v5); font-size: 11px; }
+            .ls { fill: var(--sig); font-size: 11px; }
+            .l33 { fill: var(--v33); font-size: 11px; }
+          </style>
+        </defs>
+
+        <!-- Alimentación -->
+        <rect class="box" x="20" y="30" width="150" height="62" rx="6"/>
+        <text class="t" x="32" y="55">2 × 18650 serie</text>
+        <text class="s" x="32" y="74">7.4 V nom · 8.4 V llena</text>
+
+        <rect class="box" x="210" y="30" width="110" height="62" rx="6"/>
+        <text class="t" x="222" y="55">BMS 2S</text>
+        <text class="s" x="222" y="74">B+ BM B− · P+ P−</text>
+
+        <rect class="box" x="210" y="120" width="110" height="52" rx="6"/>
+        <text class="t" x="222" y="142">Cargador 2S</text>
+        <text class="s" x="222" y="160">USB-C → 8.4 V</text>
+
+        <rect class="box" x="360" y="30" width="96" height="62" rx="6"/>
+        <text class="t" x="372" y="55">KCD</text>
+        <text class="s" x="372" y="74">interruptor</text>
+
+        <rect class="box" x="496" y="30" width="140" height="62" rx="6"/>
+        <text class="t" x="508" y="55">LM2596S</text>
+        <text class="s" x="508" y="74">ajustado a 5.0 V</text>
+
+        <rect class="box" x="676" y="30" width="120" height="62" rx="6"/>
+        <text class="t" x="688" y="55">1000 µF 16 V</text>
+        <text class="s" x="688" y="74">en la salida 5 V</text>
+
+        <path class="w5" d="M170 50 H210"/>
+        <path class="w5" d="M320 50 H360"/>
+        <path class="w5" d="M456 50 H496"/>
+        <path class="w5" d="M636 50 H676"/>
+        <path class="w5" d="M265 120 V92"/>
+        <text class="l5" x="328" y="44">P+</text>
+        <text class="l5" x="640" y="44">5 V</text>
+
+        <!-- Bus 5 V bajando a la ESP -->
+        <path class="w5" d="M736 92 V130 H380 V230"/>
+        <text class="l5" x="560" y="124">5 V → pin 5V de la ESP32-CAM</text>
+
+        <!-- ESP32-CAM -->
+        <rect class="core" x="300" y="230" width="300" height="190" rx="8"/>
+        <text class="t" x="316" y="256" style="font-size:15px">ESP32-CAM (AI-Thinker)</text>
+        <text class="s" x="316" y="276">cámara OV2640 en el conector de la placa</text>
+        <text class="s" x="316" y="306">GPIO 12 · BCLK parlante</text>
+        <text class="s" x="316" y="324">GPIO 13 · LRC / WS (compartido)</text>
+        <text class="s" x="316" y="342">GPIO 2 · DIN / SD (compartido)</text>
+        <text class="s" x="316" y="360">GPIO 14 · SCK micrófono</text>
+        <text class="s" x="316" y="378">GPIO 3 (U0R) · TX del GPS</text>
+        <text class="s" x="316" y="396">GPIO 15 SDA · GPIO 4 SCL → PCF8574</text>
+
+        <!-- Módulos a la izquierda -->
+        <rect class="box" x="20" y="250" width="200" height="64" rx="6"/>
+        <text class="t" x="32" y="274">MAX98357A + parlante</text>
+        <text class="s" x="32" y="294">VIN 5 V · parlante a + y −</text>
+        <path class="ws" d="M220 282 H300"/>
+        <text class="ls" x="228" y="276">BCLK LRC DIN</text>
+
+        <rect class="box" x="20" y="340" width="200" height="64" rx="6"/>
+        <text class="t" x="32" y="364">Micrófono INMP441</text>
+        <text class="s" x="32" y="384">VDD 3.3 V · L/R a GND</text>
+        <path class="ws" d="M220 372 H300"/>
+        <text class="ls" x="228" y="366">SCK WS SD</text>
+
+        <rect class="box" x="20" y="440" width="200" height="64" rx="6"/>
+        <text class="t" x="32" y="464">GPS NEO-6M</text>
+        <text class="s" x="32" y="484">VCC 5 V · solo su TX</text>
+        <path class="ws" d="M220 472 H260 V400 H300"/>
+        <text class="ls" x="228" y="466">TX → U0R</text>
+
+        <!-- PCF8574 y motores a la derecha -->
+        <rect class="box" x="660" y="250" width="160" height="80" rx="6"/>
+        <text class="t" x="672" y="274">PCF8574</text>
+        <text class="s" x="672" y="294">VCC 3.3 V · 0x20</text>
+        <text class="s" x="672" y="312">P0 P1 P2 motores · P3 botón</text>
+        <path class="ws" d="M600 300 H660"/>
+        <text class="ls" x="606" y="294">SDA SCL</text>
+
+        <rect class="box" x="660" y="360" width="160" height="70" rx="6"/>
+        <text class="t" x="672" y="384">3 × PNP 2N3906</text>
+        <text class="s" x="672" y="404">470 Ω base · 1N4148</text>
+        <path class="ws" d="M740 330 V360"/>
+
+        <rect class="box" x="850" y="355" width="96" height="80" rx="6"/>
+        <text class="t" x="862" y="378">JST 4 p</text>
+        <text class="s" x="862" y="398">I · C · D</text>
+        <text class="s" x="862" y="414">GND común</text>
+        <path class="ws" d="M820 395 H850"/>
+
+        <rect class="box" x="850" y="460" width="96" height="70" rx="6"/>
+        <text class="t" x="862" y="484">Motores</text>
+        <text class="s" x="862" y="504">en la ropa</text>
+        <path class="ws" d="M898 435 V460"/>
+
+        <rect class="box" x="660" y="460" width="160" height="56" rx="6"/>
+        <text class="t" x="672" y="484">Botón 12×12</text>
+        <text class="s" x="672" y="502">P3 ↔ GND</text>
+        <path class="ws" d="M640 488 H660"/>
+        <path class="ws" d="M640 488 V320 H660"/>
+
+        <!-- 3.3 V -->
+        <path class="w33" d="M600 410 H630 V540 H120 V404"/>
+        <text class="l33" x="300" y="535">3.3 V de la ESP32-CAM → micrófono, PCF8574 y emisores PNP</text>
+        <path class="w33" d="M630 540 H740 V430"/>
+
+        <text class="s" x="20" y="550">GND: todos los módulos y el negativo del regulador comparten la misma tierra</text>
+      </svg>
+    </div>
+    <p class="cap">Diagrama de bloques. Las tablas de abajo tienen cada pin; si el dibujo y la tabla no coinciden, manda la tabla.</p>
+  </section>
+
+  <section>
+    <h2>Conexiones pin por pin</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Módulo</th><th>Pin del módulo</th><th>Va a</th><th>Nota</th></tr></thead>
+        <tbody>
+          <tr><td class="mod" rowspan="6">MAX98357A</td><td><span class="pin">BCLK</span></td><td><span class="pin">GPIO 12</span></td><td>GPIO 12 debe estar en bajo al arrancar; si la placa no bootea, revisar esta línea</td></tr>
+          <tr><td><span class="pin">LRC</span></td><td><span class="pin">GPIO 13</span></td><td>compartido con WS del micrófono</td></tr>
+          <tr><td><span class="pin">DIN</span></td><td><span class="pin">GPIO 2</span></td><td>compartido con SD del micrófono</td></tr>
+          <tr><td><span class="pin">VIN</span></td><td><span class="net n5">5 V</span></td><td></td></tr>
+          <tr><td><span class="pin">GND</span></td><td><span class="net ngnd">GND</span></td><td></td></tr>
+          <tr><td><span class="pin">+ / −</span> salida</td><td>parlante</td><td><strong>Nunca</strong> el − del parlante a GND: la salida es en puente</td></tr>
+
+          <tr><td class="mod" rowspan="6">INMP441</td><td><span class="pin">SCK</span></td><td><span class="pin">GPIO 14</span></td><td></td></tr>
+          <tr><td><span class="pin">WS</span></td><td><span class="pin">GPIO 13</span></td><td>mismo pin que LRC</td></tr>
+          <tr><td><span class="pin">SD</span></td><td><span class="pin">GPIO 2</span></td><td>mismo pin que DIN</td></tr>
+          <tr><td><span class="pin">L/R</span></td><td><span class="net ngnd">GND</span></td><td></td></tr>
+          <tr><td><span class="pin">VDD</span></td><td><span class="net n33">3.3 V</span></td><td>nunca 5 V</td></tr>
+          <tr><td><span class="pin">GND</span></td><td><span class="net ngnd">GND</span></td><td></td></tr>
+
+          <tr><td class="mod" rowspan="4">GPS NEO-6M</td><td><span class="pin">TX</span></td><td><span class="pin">GPIO 3 (U0R)</span></td><td>dejar un <strong>jumper</strong> en esta línea: se desconecta para programar</td></tr>
+          <tr><td><span class="pin">RX</span></td><td>sin conectar</td><td></td></tr>
+          <tr><td><span class="pin">VCC</span></td><td><span class="net n5">5 V</span></td><td></td></tr>
+          <tr><td><span class="pin">GND</span></td><td><span class="net ngnd">GND</span></td><td></td></tr>
+
+          <tr><td class="mod" rowspan="9">PCF8574</td><td><span class="pin">SDA</span></td><td><span class="pin">GPIO 15</span></td><td>el módulo ya trae resistencias pull-up</td></tr>
+          <tr><td><span class="pin">SCL</span></td><td><span class="pin">GPIO 4</span></td><td>es el pin del LED flash: parpadea un poco, es normal</td></tr>
+          <tr><td><span class="pin">VCC</span></td><td><span class="net n33">3.3 V</span></td><td><strong>nunca 5 V</strong> (sus salidas irían a 5 V contra los PNP de 3.3 V)</td></tr>
+          <tr><td><span class="pin">GND</span></td><td><span class="net ngnd">GND</span></td><td></td></tr>
+          <tr><td><span class="pin">A0 A1 A2</span></td><td><span class="net ngnd">GND</span></td><td>dirección 0x20 (si fuera PCF8574A sería 0x38)</td></tr>
+          <tr><td><span class="pin">P0</span></td><td>base PNP izquierdo</td><td>a través de 470 Ω</td></tr>
+          <tr><td><span class="pin">P1</span></td><td>base PNP centro</td><td>a través de 470 Ω</td></tr>
+          <tr><td><span class="pin">P2</span></td><td>base PNP derecho</td><td>a través de 470 Ω</td></tr>
+          <tr><td><span class="pin">P3</span></td><td>botón</td><td>la otra pata del botón a GND (patas en diagonal del pulsador 12×12)</td></tr>
+
+          <tr><td class="mod" rowspan="2">ESP32-CAM</td><td><span class="pin">5V</span> / <span class="pin">GND</span></td><td>salida del LM2596</td><td>alimentar siempre por 5V; <strong>nunca</strong> meter la fuente al pin 3V3</td></tr>
+          <tr><td><span class="pin">3V3</span></td><td><span class="net n33">3.3 V</span> para módulos</td><td>sale de la ESP: alimenta micrófono, PCF8574 y emisores PNP</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Circuito de cada motor (×3)</h2>
+    <div class="grid2">
+      <div class="panel">
+        <h3>Transistor PNP 2N3906 en el lado alto</h3>
+        <ul class="checks">
+          <li><b>Emisor</b> → <span class="net n33">3.3 V</span></li>
+          <li><b>Base</b> → resistencia de 470 Ω → salida P0, P1 o P2 del PCF8574</li>
+          <li><b>Colector</b> → cable al motor (+)</li>
+          <li><b>Motor (−)</b> → <span class="net ngnd">GND</span> (cable común en el conector)</li>
+          <li><b>Diodo 1N4148</b> en paralelo con el motor: <b>cátodo (franja)</b> al colector, ánodo a GND</li>
+        </ul>
+        <p class="cap">Se usa PNP porque el código enciende con LOW y el PCF8574 arranca con salidas en alto: así los motores quedan apagados al prender.</p>
+      </div>
+      <div class="panel">
+        <h3>Conector de los motores (JST de 4 pines)</h3>
+        <ul class="checks">
+          <li>Pin 1 → colector del PNP <b>izquierdo</b></li>
+          <li>Pin 2 → colector del PNP <b>centro</b></li>
+          <li>Pin 3 → colector del PNP <b>derecho</b></li>
+          <li>Pin 4 → <b>GND común</b> de los tres motores</li>
+        </ul>
+        <p class="cap">Transistores y diodos quedan en la placa; solo salen 4 cables al arnés. El conector permite quitar el arnés para lavar la ropa o la correa.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Alimentación</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Desde</th><th>Hasta</th><th>Nota</th></tr></thead>
+        <tbody>
+          <tr><td>(+) de la batería 1</td><td>BMS <span class="pin">B+</span></td><td>extremo positivo del portapilas</td></tr>
+          <tr><td>Unión entre las 2 baterías</td><td>BMS <span class="pin">BM</span></td><td>si el portapilas no saca cable del medio, soldar uno a la lámina que las une (sin baterías puestas)</td></tr>
+          <tr><td>(−) de la batería 2</td><td>BMS <span class="pin">B−</span></td><td>extremo negativo del portapilas</td></tr>
+          <tr><td>Cargador 2S USB-C <span class="pin">OUT+ / OUT−</span></td><td>BMS <span class="pin">P+ / P−</span></td><td>va antes del interruptor: carga aunque esté apagado</td></tr>
+          <tr><td>BMS <span class="pin">P+</span></td><td>interruptor KCD → LM2596 <span class="pin">IN+</span></td><td>el interruptor corta solo el positivo</td></tr>
+          <tr><td>BMS <span class="pin">P−</span></td><td>LM2596 <span class="pin">IN−</span></td><td>directo</td></tr>
+          <tr><td>LM2596 <span class="pin">OUT+</span></td><td>ESP32-CAM <span class="pin">5V</span>, MAX VIN, GPS VCC</td><td><strong>ajustar a 5.0 V con multímetro antes de conectar nada</strong></td></tr>
+          <tr><td>LM2596 <span class="pin">OUT−</span></td><td>GND de todo</td><td></td></tr>
+          <tr><td>Condensador 1000 µF 16 V</td><td>entre 5 V y GND, junto a la ESP32-CAM</td><td>pata larga a 5 V, franja a GND; evita los reinicios al sonar el parlante</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="warn">
+      <strong>Antes de conectar la ESP32-CAM por primera vez</strong>
+      <span>Mide cada batería (deben diferir menos de 0.1 V), mide 7–8.4 V entre P+ y P−, y mide 5.0 V en la salida del LM2596 sin nada conectado. Recién entonces conecta la placa.</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Para que la placa se pueda seguir programando</h2>
+    <ol class="steps prose">
+      <li><b>ESP32-CAM sobre zócalo hembra</b> (dos tiras de 8 pines), no soldada directo: para programarla se saca y se pone en el adaptador ESP32-CAM-MB.</li>
+      <li><b>Jumper en la línea TX del GPS → GPIO 3.</b> Se quita antes de programar y se pone después.</li>
+      <li>Dejar la <b>tapa de la carcasa removible</b> (tornillos o clip) para llegar al zócalo y a las baterías.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Distribución en la carcasa</h2>
+    <p class="prose">Se lleva en el pecho, sujeta a una correa o arnés, con la cámara mirando al frente y <b>inclinada 10–15° hacia abajo</b> para ver el suelo a 1–2 m. Medidas internas aproximadas: <b>100 × 65 × 40 mm</b>; confirmar con las piezas reales.</p>
+    <div class="diagram" role="img" aria-label="Vista frontal y superior de la carcasa con la ubicación de cada pieza y abertura">
+      <svg viewBox="0 0 960 400" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <style>
+            .case { fill: color-mix(in srgb, var(--mask) 6%, var(--surface)); stroke: var(--fg); stroke-width: 2; }
+            .part { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; }
+            .hole { fill: var(--copper); }
+            .ht { fill: var(--copper); font-size: 11px; }
+            .pt { fill: var(--fg); font-size: 11.5px; }
+            .ttl { fill: var(--fg); font-size: 13px; font-weight: 600; }
+            .lead { stroke: var(--copper); stroke-width: 1; fill: none; }
+          </style>
+        </defs>
+
+        <text class="ttl" x="30" y="28">Vista frontal (lo que ve la gente)</text>
+        <rect class="case" x="30" y="44" width="380" height="250" rx="16"/>
+        <circle class="hole" cx="220" cy="110" r="14"/>
+        <text class="ht" x="244" y="106">ventana de la cámara</text>
+        <text class="ht" x="244" y="121">(lente con 10–15° abajo)</text>
+        <g>
+          <circle class="hole" cx="110" cy="210" r="3"/><circle class="hole" cx="122" cy="210" r="3"/><circle class="hole" cx="134" cy="210" r="3"/>
+          <circle class="hole" cx="110" cy="222" r="3"/><circle class="hole" cx="122" cy="222" r="3"/><circle class="hole" cx="134" cy="222" r="3"/>
+          <circle class="hole" cx="110" cy="234" r="3"/><circle class="hole" cx="122" cy="234" r="3"/><circle class="hole" cx="134" cy="234" r="3"/>
+        </g>
+        <text class="ht" x="70" y="262">rejilla del parlante</text>
+        <circle class="hole" cx="330" cy="222" r="3"/>
+        <text class="ht" x="290" y="246">orificio del micrófono</text>
+        <text class="ht" x="290" y="260">(lejos del parlante)</text>
+
+        <text class="ttl" x="470" y="28">Vista superior / bordes</text>
+        <rect class="case" x="470" y="44" width="460" height="250" rx="16"/>
+        <rect class="part" x="490" y="64" width="190" height="70" rx="4"/>
+        <text class="pt" x="500" y="96">GPS NEO-6M</text>
+        <text class="pt" x="500" y="114">antena cerámica hacia ARRIBA</text>
+        <rect class="part" x="700" y="64" width="210" height="70" rx="4"/>
+        <text class="pt" x="710" y="96">Portapilas 2×18650</text>
+        <text class="pt" x="710" y="114">+ BMS al costado</text>
+        <rect class="part" x="490" y="150" width="140" height="70" rx="4"/>
+        <text class="pt" x="500" y="180">ESP32-CAM</text>
+        <text class="pt" x="500" y="198">en zócalo, al frente</text>
+        <rect class="part" x="645" y="150" width="120" height="70" rx="4"/>
+        <text class="pt" x="655" y="180">PCF8574</text>
+        <text class="pt" x="655" y="198">+ 3 PNP</text>
+        <rect class="part" x="780" y="150" width="130" height="70" rx="4"/>
+        <text class="pt" x="790" y="180">LM2596S</text>
+        <text class="pt" x="790" y="198">ranuras de aire</text>
+        <rect class="part" x="490" y="232" width="110" height="46" rx="4"/>
+        <text class="pt" x="500" y="260">MAX98357A</text>
+        <rect class="part" x="612" y="232" width="110" height="46" rx="4"/>
+        <text class="pt" x="622" y="260">Cargador 2S</text>
+
+        <!-- aberturas en los bordes -->
+        <rect class="hole" x="930" y="230" width="8" height="22" rx="2"/>
+        <text class="ht" x="790" y="316">USB-C de carga + ventana del LED</text>
+        <path class="lead" d="M934 252 V304 H900"/>
+        <rect class="hole" x="930" y="90" width="8" height="30" rx="2"/>
+        <text class="ht" x="846" y="340">interruptor KCD (lateral)</text>
+        <path class="lead" d="M938 105 H948 V330 H930"/>
+        <rect class="hole" x="560" y="36" width="34" height="8" rx="2"/>
+        <text class="ht" x="470" y="364">botón en el borde superior (fácil de hallar al tacto)</text>
+        <path class="lead" d="M577 36 V20 H520 V352"/>
+        <rect class="hole" x="680" y="294" width="40" height="8" rx="2"/>
+        <text class="ht" x="640" y="384">salida del cable de motores (JST 4 p) con alivio de tensión</text>
+        <path class="lead" d="M700 302 V372"/>
+      </svg>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h3>Aberturas que necesita la carcasa</h3>
+        <ul class="checks">
+          <li><b>Cámara:</b> ventana al frente, con la lente inclinada 10–15° hacia abajo.</li>
+          <li><b>Parlante:</b> rejilla de agujeros de 2–3 mm.</li>
+          <li><b>Micrófono:</b> un agujero de 2 mm justo encima del INMP441, en el lado opuesto al parlante.</li>
+          <li><b>USB-C de carga</b> y una ventanita para ver el LED del cargador.</li>
+          <li><b>Interruptor KCD</b> en un costado. Medir el recorte con el interruptor real; el KCD11 suele pedir unos 19 × 13 mm.</li>
+          <li><b>Botón</b> en el borde superior, que sobresalga un poco para hallarlo sin ver.</li>
+          <li><b>Salida del cable de motores</b> con alivio de tensión (nudo o abrazadera por dentro).</li>
+          <li><b>Ranuras de ventilación</b> cerca del LM2596.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Cuidados al distribuir</h3>
+        <ul class="checks">
+          <li>La <b>antena del GPS mira al cielo</b> y no queda debajo de las baterías ni de nada metálico.</li>
+          <li><b>Antena WiFi:</b> se recomienda la <b>antena externa IPX</b>, pegada por dentro a la pared de la carcasa, lejos de las baterías y del LM2596. Para usarla hay que mover la resistencia de 0 Ω junto al conector IPX hacia el lado del conector (de fábrica apunta al zigzag). Nunca encender con la IPX seleccionada y sin antena puesta. Si se queda el zigzag, que no tenga metal ni baterías encima.</li>
+          <li>El micrófono, <b>lejos del parlante</b>, para que no se escuche a sí mismo.</li>
+          <li>Las baterías en su propio compartimento, sin tornillos que las presionen.</li>
+          <li>El cable de la cámara (flex) sin doblez marcado.</li>
+          <li>Ningún módulo apoyado de cara sobre otro: separar con pegamento caliente o espaciadores.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Motores en la ropa</h2>
+    <div class="grid2">
+      <div class="panel">
+        <h3>Dónde van</h3>
+        <ul class="checks">
+          <li><b>Izquierdo:</b> lado izquierdo del pecho o de la correa, unos 10–12 cm del centro.</li>
+          <li><b>Centro:</b> sobre el esternón, debajo de la carcasa.</li>
+          <li><b>Derecho:</b> lado derecho, a la misma distancia.</li>
+        </ul>
+        <p class="cap">Con esa separación, la persona distingue bien de qué lado viene la vibración.</p>
+      </div>
+      <div class="panel">
+        <h3>Cómo fijarlos</h3>
+        <ul class="checks">
+          <li>Cada motor en una cápsula pequeña impresa en 3D o en un trozo de fieltro, pegado con <b>velcro</b> a una correa elástica de pecho.</li>
+          <li>Que toquen el cuerpo a través de una sola capa de tela.</li>
+          <li>Cable flexible de silicona 26–28 AWG, recogido a lo largo de la correa hasta el conector JST.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Lista de comprobación al soldar</h2>
+    <ul class="checks prose">
+      <li>Probar continuidad de cada GND a GND antes de alimentar.</li>
+      <li>Comprobar que no hay corto entre 5 V y GND, ni entre 3.3 V y GND (el multímetro no debe pitar).</li>
+      <li>Revisar la orientación de cada 2N3906 (E-B-C), cada diodo (franja al colector) y el condensador (franja a GND).</li>
+      <li>Primer encendido sin motores conectados: en el monitor serie debe salir <code>[Haptic] PCF8574 inicializado</code>.</li>
+      <li>Después conectar el arnés de motores y probar con un pedido de ruta en modo demo.</li>
+    </ul>
+  </section>
+
+  <footer>Proyecto Halo+ Visión · asistente de navegación para personas con baja visión. Las conexiones de esta hoja son las mismas que el firmware en <code>firmware/</code> espera; cambiar un pin significa cambiar el código.</footer>
+</div>
