@@ -91,3 +91,11 @@ con salidas en alto: así los motores quedan apagados al encender.
   nunca a 3V3 (así se dañó una DevKit). Antes de subir firmware, desconectar el TX del GPS (GPIO3).
 - Pendiente: prueba de navegación en la mesa y luego prueba real en la calle (power bank + hotspot);
   alimentación con baterías (BMS 2S + LM2596S + capacitor 1000 µF); placa y carcasa (compañero).
+
+## Estado (6 nov 2026) — reemplaza lo anterior donde se contradiga
+- La guía completa y al día está en `AGENTS.md` (también la leen OpenCode y Codex).
+- Hecho: navegación probada en la placa (modo demo), modo guía que narra el camino, peligros cercanos
+  con tres pulsos y prioridad en la voz, SOS que se reintenta sin conexión, red de peligros que ahora
+  también reporta, app y alertas en español, entorno `demo` en platformio.ini, README corregido.
+- La placa quedó con el firmware real (`esp32cam`) y se entrega para soldar.
+- Pendientes: ver la sección "Pendientes" de `AGENTS.md`.

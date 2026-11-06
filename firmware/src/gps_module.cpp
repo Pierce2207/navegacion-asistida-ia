@@ -66,7 +66,7 @@ bool GPSModule::initialize() {
         Serial.println("❌ GPS module communication failed - no data received");
         Serial.println("\nTroubleshooting tips:");
         Serial.println("1. Check wiring:");
-        Serial.println("   GPS VCC -> ESP32 3.3V (NOT 5V!)");
+        Serial.println("   GPS VCC -> 5V (the GY-GPS6MV2 module has its own regulator)");
         Serial.println("   GPS GND -> ESP32 GND");
         Serial.printf("   GPS TX  -> ESP32 GPIO %d\n", GPS_RX_PIN);
         Serial.printf("   GPS RX  -> ESP32 GPIO %d\n", GPS_TX_PIN);

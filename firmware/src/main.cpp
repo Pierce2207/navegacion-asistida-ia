@@ -143,6 +143,8 @@ extern volatile char playbackVibrateSide;
 void vibrateOnPlayback();
 void checkAndAnnounceNearbyPlaces();
 void checkNearbyHazards();
+void queueHazardReport(const String& message);
+void processHazardReport();
 String stripHtmlTags(const String& html);
 
 // Tool call handler for system actions
@@ -488,6 +490,8 @@ void handleSystemAction(const JsonDocument& doc) {
         }
         // Obstacle alerts should always be spoken for safety
         shouldSpeak = true;
+        // Fixed hazards (a hole, a step...) also go to the shared network for other users
+        queueHazardReport(message);
     }
 
     // Handle speaking if required
@@ -1614,49 +1618,174 @@ void checkAndAnnounceNearbyPlaces() {
 // user's left/right - it always pulses MOTOR_CENTER as a general "hazard nearby"
 // warning. If a compass module is added later, replace the CENTER trigger below
 // with a bearing calculation (see firmware/haptic/INTEGRACION.md, section 3).
+// Spoken name for each hazard category stored by the network
+static String hazardCategoryName(const String& category) {
+    if (category == "hole") return "un hueco";
+    if (category == "stairs") return "un escalón o escalera";
+    if (category == "head_level_obstacle") return "un obstáculo a la altura de la cabeza";
+    if (category == "construction") return "una obra";
+    if (category == "pole") return "un poste";
+    if (category == "curb") return "un desnivel en la vereda";
+    return "un peligro";
+}
+
+// True while something else needs the link or the TLS memory (speech, a spoken command,
+// an SOS): hazard network requests wait for a quiet moment instead of competing
+static bool deviceBusyForNetwork() {
+    return is_speaking || is_recording || voice_stream_active || priority_request ||
+           visionAssistant.isAwaitingCommandReply();
+}
+
+// Only a real GPS fix: in the demo build the position is simulated and must not be reported
+static bool realGpsFix(double& lat, double& lon) {
+#ifdef TEST_FAKE_GPS_LAT
+    return false;
+#else
+    GPSData g = visionAssistant.getCurrentGPSData();
+    lat = g.latitude;
+    lon = g.longitude;
+    return g.isValid;
+#endif
+}
+
 void checkNearbyHazards() {
-    const unsigned long HAZARD_CHECK_INTERVAL = 5000; // ms between network checks
-    const float HAZARD_ALERT_RADIUS_M = 15.0;         // matches MERGE_RADIUS_M in api/hazards.js
+    const unsigned long HAZARD_CHECK_INTERVAL = 15000; // ms between network checks
+    const float HAZARD_ALERT_RADIUS_M = 15.0;          // matches MERGE_RADIUS_M in api/hazards.js
+    // Each hazard is announced once: it used to vibrate every 5 s while the user stood near it
+    static String lastAnnouncedId;
 
     if (millis() - last_hazard_check_time < HAZARD_CHECK_INTERVAL) {
         return;
     }
+    if (!hapticsAvailable || WiFi.status() != WL_CONNECTED || deviceBusyForNetwork()) {
+        return;
+    }
+    double lat, lon;
+    if (!realGpsFix(lat, lon)) {
+        return;
+    }
     last_hazard_check_time = millis();
 
-    if (!hapticsAvailable || WiFi.status() != WL_CONNECTED) {
-        return;
-    }
-
-    GPSData current_gps_data = visionAssistant.getCurrentGPSData();
-    if (!current_gps_data.isValid) {
-        return;
-    }
-    last_hazard_check_gps = current_gps_data;
-
+    navNetwork(true);
     HTTPClient http;
-    String url = String(HAZARDS_API_URL) + "/api/hazards?lat=" +
-                 String(current_gps_data.latitude, 6) + "&lon=" +
-                 String(current_gps_data.longitude, 6) + "&radius=100";
-
+    String url = String(HAZARDS_API_URL) + "/api/hazards?lat=" + String(lat, 6) + "&lon=" +
+                 String(lon, 6) + "&radius=100";
     http.begin(url);
     int httpResponseCode = http.GET();
-
-    if (httpResponseCode == 200) {
-        String payload = http.getString();
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, payload);
-        if (!error && doc.is<JsonArray>() && doc.size() > 0) {
-            float closestDistance = doc[0]["distance_m"].as<float>();
-            String category = doc[0]["category"].as<String>();
-            if (closestDistance <= HAZARD_ALERT_RADIUS_M) {
-                Serial.printf("⚠️ Shared hazard nearby: %s (%.1fm away)\n", category.c_str(), closestDistance);
-                hapticsAlert(HazardDirection::CENTER);
-            }
-        }
-    } else if (httpResponseCode > 0) {
-        Serial.printf("Hazard network check failed, HTTP %d\n", httpResponseCode);
-    }
+    String payload = httpResponseCode == 200 ? http.getString() : String();
     http.end();
+    navNetwork(false);
+
+    if (httpResponseCode != 200) {
+        if (httpResponseCode > 0) {
+            Serial.printf("Hazard network check failed, HTTP %d\n", httpResponseCode);
+        }
+        return;
+    }
+    JsonDocument doc;
+    if (deserializeJson(doc, payload) || !doc.is<JsonArray>() || doc.size() == 0) {
+        return;
+    }
+    float closestDistance = doc[0]["distance_m"].as<float>();
+    String id = doc[0]["id"].as<String>();
+    String category = doc[0]["category"].as<String>();
+    if (closestDistance > HAZARD_ALERT_RADIUS_M || id == lastAnnouncedId) {
+        return;
+    }
+    lastAnnouncedId = id;
+    Serial.printf("⚠️ Shared hazard nearby: %s (%.1fm away)\n", category.c_str(), closestDistance);
+    hapticsAlert(HazardDirection::CENTER);
+    navSpeak("Cuidado, otros usuarios reportaron " + hazardCategoryName(category) + " a " +
+             String((int)round(closestDistance)) + " metros.");
+}
+
+// --- Reporting hazards to the shared network ---
+// Only fixed hazards that will still be there for the next person (a hole, a step, a pole,
+// works). People, cars and bikes move, so they are not reported.
+static String hazardCategoryFromMessage(const String& message) {
+    String m = message;
+    m.toLowerCase();
+    if (m.indexOf("hueco") >= 0 || m.indexOf("bache") >= 0 || m.indexOf("zanja") >= 0 ||
+        m.indexOf("buzón") >= 0 || m.indexOf("buzon") >= 0) return "hole";
+    if (m.indexOf("escal") >= 0 || m.indexOf("grada") >= 0) return "stairs";
+    if (m.indexOf("cabeza") >= 0 || m.indexOf("rama") >= 0 || m.indexOf("toldo") >= 0) return "head_level_obstacle";
+    if (m.indexOf("obra") >= 0 || m.indexOf("construcci") >= 0) return "construction";
+    if (m.indexOf("poste") >= 0) return "pole";
+    if (m.indexOf("desnivel") >= 0 || m.indexOf("sardinel") >= 0 || m.indexOf("bordillo") >= 0) return "curb";
+    return "";
+}
+
+struct ReportedHazard {
+    String category;
+    double lat, lon;
+    unsigned long at;
+};
+static ReportedHazard recentReports[8];
+static int recentReportsNext = 0;
+static bool hazardReportPending = false;
+static ReportedHazard pendingReport;
+const unsigned long HAZARD_REPORT_MAX_AGE_MS = 120000;   // drop a report not sent within 2 min
+const unsigned long HAZARD_REPEAT_WINDOW_MS = 30UL * 60UL * 1000UL;
+const double HAZARD_REPEAT_RADIUS_M = 30.0;
+
+// Called when Gemini raises an obstacle_alert. The API counts 3 reports of the same hazard as
+// "verified", so one device must not report the same thing over and over: same category
+// within 30 m in the last 30 min is skipped.
+void queueHazardReport(const String& message) {
+    String category = hazardCategoryFromMessage(message);
+    double lat, lon;
+    if (category.isEmpty() || !realGpsFix(lat, lon)) {
+        return;
+    }
+    for (auto& r : recentReports) {
+        if (r.at != 0 && r.category == category && millis() - r.at < HAZARD_REPEAT_WINDOW_MS &&
+            Navigator::distanceMeters(lat, lon, r.lat, r.lon) < HAZARD_REPEAT_RADIUS_M) {
+            return;
+        }
+    }
+    pendingReport = {category, lat, lon, millis()};
+    hazardReportPending = true;
+    Serial.printf("🗺️ Hazard queued for the shared network: %s\n", category.c_str());
+}
+
+// Sends the queued report from the main loop once the device is quiet
+void processHazardReport() {
+    if (!hazardReportPending) {
+        return;
+    }
+    if (millis() - pendingReport.at > HAZARD_REPORT_MAX_AGE_MS) {
+        hazardReportPending = false;
+        return;
+    }
+    if (WiFi.status() != WL_CONNECTED || deviceBusyForNetwork()) {
+        return;
+    }
+    hazardReportPending = false;
+
+    JsonDocument body;
+    body["lat"] = pendingReport.lat;
+    body["lon"] = pendingReport.lon;
+    body["category"] = pendingReport.category;
+    body["confidence"] = 0.7;
+    body["device_id"] = "esp32_camera";
+    String json;
+    serializeJson(body, json);
+
+    navNetwork(true);
+    HTTPClient http;
+    http.begin(String(HAZARDS_API_URL) + "/api/hazards");
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(json);
+    http.end();
+    navNetwork(false);
+
+    if (code == 200 || code == 201) {
+        Serial.printf("🗺️ Hazard reported (%s), HTTP %d\n", pendingReport.category.c_str(), code);
+        recentReports[recentReportsNext] = pendingReport;
+        recentReportsNext = (recentReportsNext + 1) % 8;
+    } else {
+        Serial.printf("🗺️ Hazard report failed, HTTP %d\n", code);
+    }
 }
 
 String stripHtmlTags(const String& html) {
@@ -1922,8 +2051,10 @@ void loop() {
         }
     }
 
-    // Check the shared hazard network (motor pulses are turned off in buttonTask)
+    // Shared hazard network: warn about hazards others reported, send the ones seen here
+    // (motor pulses are turned off in buttonTask)
     checkNearbyHazards();
+    processHazardReport();
 
     // Check for commands from the audio task
     CommandMessage cmdMsg;
