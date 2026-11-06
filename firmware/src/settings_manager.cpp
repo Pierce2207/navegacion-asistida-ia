@@ -76,11 +76,21 @@ UserSettings SettingsManager::getSettings() {
     // Check if cache is expired or invalid
     if (!currentSettings.isValid || (millis() - lastFetchTime > CACHE_DURATION)) {
         Serial.println("Settings cache expired or invalid, fetching new settings...");
-        if (!fetchSettings()) {
+        // A couple of retries: the WiFi sometimes drops right after connecting, and a failed
+        // fetch at boot left the whole session in the fallback language
+        bool fetched = false;
+        for (int attempt = 0; attempt < 3 && !fetched; attempt++) {
+            if (attempt > 0) {
+                delay(2000);
+            }
+            fetched = fetchSettings();
+        }
+        if (!fetched) {
             Serial.println("Failed to fetch settings, using defaults");
-            // Return default settings if fetch fails
+            // Return default settings if fetch fails. Spanish: it's the language of this
+            // project's users, and the app's own default.
             UserSettings defaultSettings;
-            defaultSettings.language = "en-US";
+            defaultSettings.language = "es";
             defaultSettings.isValid = true;
             return defaultSettings;
         }

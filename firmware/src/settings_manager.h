@@ -10,7 +10,7 @@ struct UserSettings {
     int volume;  // 0-100, from the app's volume slider
     bool isValid;
 
-    UserSettings() : language("en-US"), volume(50), isValid(false) {}
+    UserSettings() : language("es"), volume(50), isValid(false) {}
 };
 
 class SettingsManager {

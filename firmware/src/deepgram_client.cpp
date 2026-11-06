@@ -3,7 +3,7 @@
 
 #include "esp_heap_caps.h"
 
-DeepgramClient::DeepgramClient(const char* api_key) : api_key(api_key), defaultLanguage("en-US"), stt_doc(nullptr), response_buffer(nullptr) {
+DeepgramClient::DeepgramClient(const char* api_key) : api_key(api_key), defaultLanguage("es"), stt_doc(nullptr), response_buffer(nullptr) {
     // Constructor now only initializes variables, allocation is handled in begin()
 }
 

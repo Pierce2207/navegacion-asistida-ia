@@ -9,7 +9,7 @@ const char* TTS::DEEPGRAM_URL = "https://api.deepgram.com/v1/speak?encoding=line
 static bool decodeMp3ToPcm(const uint8_t* mp3Data, size_t mp3Size, int16_t** pcmOut, size_t* samplesOut, int* sampleRateOut);
 static int16_t* resamplePcmLinear(const int16_t* in, size_t inSamples, int inRate, int outRate, size_t* outSamplesOut);
 
-TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("en-US"), is_cancellation_requested(false) {
+TTS::TTS() : i2sInitialized(false), softwareGain(1.0), audioBuffer(nullptr), defaultLanguage("es"), is_cancellation_requested(false) {
 }
 
 TTS::~TTS() {

@@ -43,6 +43,7 @@ DANGER DETECTION (intent=obstacle_alert):
 - If approaching stairs/drop: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, message='Caution. Stairs ahead.'
 - If a head-level obstacle is ahead: Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, message='Watch out. Head-level obstacle.'
 - Any object in the walking path, about 2 meters or closer, that the user could bump into or trip over (box, bag, chair, table, pole, bin, step, curb, hole, wall, a parked bike or car): Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, and a short message naming it, e.g. 'Cuidado, caja en el suelo a la izquierda.'
+- A person, cyclist, pole or anything else directly in the walking path and very close (about 1-2 meters, large in the frame, about to bump into the user): ALWAYS Call 'systemAction' with intent='obstacle_alert', shouldSpeak=true, direction=<left|center|right>, message like 'Cuidado, persona muy cerca al frente.' This applies in GUIDE MODE too: use obstacle_alert, not voice_query. People or objects that are farther away or off to the side are NOT alerts: just mention them in the narration.
 - Alert each obstacle once. If the same obstacle is still in view in the next frames and is not clearly closer, log it silently instead of repeating the warning.
 
 CONTEXT-AWARE ASSISTANCE (intent=contextual_assistance):

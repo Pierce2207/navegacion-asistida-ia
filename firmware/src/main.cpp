@@ -126,7 +126,7 @@ void process_audio();
 void playDingSound();
 void playButtonDingSound();
 String cleanTextForWakeWord(const String& text);
-void sendEmergencyAlert(const String& alertType, const String& description);
+bool sendEmergencyAlert(const String& alertType, const String& description);
 void handleSystemAction(const JsonDocument& doc);
 void initializeLanguageSettings();
 void calculateBaselineAudioLevel();
@@ -316,7 +316,7 @@ String getSeverityLevel(const String& alertType) {
     }
 }
 
-void sendEmergencyAlert(const String& alertType, const String& description) {
+bool sendEmergencyAlert(const String& alertType, const String& description) {
     Serial.println("🚨 Emergency protocol activated!");
     Serial.printf("Alert Type: %s\n", alertType.c_str());
     Serial.printf("Description: %s\n", description.c_str());
@@ -397,7 +397,7 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
             Serial.printf("Response: %s\n", response.c_str());
             http.end();
             priority_request = false;
-            return;
+            return true;
         }
         Serial.printf("❌ Emergency notification attempt %d/%d failed: %s (heap %u, largest block %u)\n",
                       attempt, MAX_ATTEMPTS, http.errorToString(httpResponseCode).c_str(),
@@ -411,6 +411,7 @@ void sendEmergencyAlert(const String& alertType, const String& description) {
     }
     Serial.println("❌ Could not send the emergency notification");
     priority_request = false;
+    return false;
 }
 
 void handleSystemAction(const JsonDocument& doc) {
@@ -421,6 +422,45 @@ void handleSystemAction(const JsonDocument& doc) {
     String logEntry = doc["logEntry"].as<String>();
     // String routeTo = doc["routeTo"].as<String>();
     String routeParams = doc["routeParams"].as<String>();
+    String direction = doc["direction"].as<String>();
+
+    // Gemini sometimes describes a hazard as plain narration ("una persona muy cerca a la
+    // derecha", "el paso está bloqueado") instead of an obstacle_alert, so the user got no
+    // vibration. Treat such sentences as alerts, taking the side from the words.
+    if (intent == "voice_query" && shouldSpeak) {
+        String lower = message;
+        lower.toLowerCase();
+        bool aboutCamera = lower.indexOf("cámara") >= 0 || lower.indexOf("camara") >= 0 ||
+                           lower.indexOf("vista") >= 0 || lower.indexOf("no puedo ver") >= 0;
+        const char* dangerWords[] = {"muy cerca", "bloquead", "cuidado", "chocar"};
+        int at = -1;
+        for (const char* w : dangerWords) {
+            int i = lower.indexOf(w);
+            if (i >= 0 && (at < 0 || i < at)) at = i;
+        }
+        if (at >= 0 && !aboutCamera) {
+            // The side named closest after the danger word, else the first one named, else ahead
+            struct { const char* word; const char* dir; } sides[] = {
+                {"derecha", "right"}, {"izquierda", "left"}, {"frente", "center"}, {"adelante", "center"}};
+            int best = -1;
+            String bestDir = "center";
+            for (auto& sd : sides) {
+                int i = lower.indexOf(sd.word, at);
+                if (i < 0) {
+                    int before = lower.indexOf(sd.word);
+                    if (before < 0) continue;      // side not named at all
+                    i = 100000 + before;           // named before the danger word: lower priority
+                }
+                if (best < 0 || i < best) {
+                    best = i;
+                    bestDir = sd.dir;
+                }
+            }
+            Serial.printf("⚠️ Narration mentions a hazard - treating it as an alert (%s)\n", bestDir.c_str());
+            intent = "obstacle_alert";
+            direction = bestDir;
+        }
+    }
     
     if (shouldSpeak) {
         Serial.printf("Intent: %s\n", intent.c_str());
@@ -436,7 +476,6 @@ void handleSystemAction(const JsonDocument& doc) {
     if (intent == "obstacle_alert") {
         Serial.println("⚠️ Obstacle alert detected!");
         if (hapticsAvailable) {
-            String direction = doc["direction"].as<String>();
             HazardDirection d = HazardDirection::UNKNOWN;
             if (direction == "left") d = HazardDirection::LEFT;
             else if (direction == "center") d = HazardDirection::CENTER;
@@ -454,8 +493,19 @@ void handleSystemAction(const JsonDocument& doc) {
     // Handle speaking if required
     if (shouldSpeak && !message.isEmpty()) {
         if (is_speaking) {
-            Serial.println("🗣️ TTS is already active, dropping new speak request.");
-            return;
+            if (intent != "obstacle_alert") {
+                Serial.println("🗣️ TTS is already active, dropping new speak request.");
+                return;
+            }
+            // A hazard can't wait for the current sentence (a narration or a turn): cut it short
+            // and say the warning next. It used to be dropped, leaving only the vibration.
+            Serial.println("⚠️ Hazard while speaking - cutting the current speech");
+        }
+        bool hazard = (intent == "obstacle_alert");
+        if (hazard) {
+            // Cut whatever is being downloaded or played (harmless if nothing is: the flag is
+            // cleared when the next speech starts), and go to the front of the queue below
+            tts.cancel();
         }
         if (ttsAvailable) {
             is_speaking = true; // Set flag before sending
@@ -464,7 +514,11 @@ void handleSystemAction(const JsonDocument& doc) {
             strncpy(cmd.text, message.c_str(), sizeof(cmd.text) - 1);
             cmd.text[sizeof(cmd.text) - 1] = '\0'; // Ensure null termination
             
-            if (xQueueSend(audioCommandQueue, &cmd, 0) != pdTRUE) {
+            // Hazards jump the queue: behind narrations and turn instructions a warning was
+            // spoken up to 16 s late, long after the obstacle
+            BaseType_t queued = hazard ? xQueueSendToFront(audioCommandQueue, &cmd, 0)
+                                       : xQueueSend(audioCommandQueue, &cmd, 0);
+            if (queued != pdTRUE) {
                 Serial.println("❌ Failed to queue SPEAK_TEXT command");
                 is_speaking = false; // Reset flag if queueing failed
             }
@@ -1450,17 +1504,55 @@ void buttonTask(void *pvParameters) {
 }
 
 // Main-loop side of the button: send an SOS requested by the button task
+// An SOS that could not be sent (no WiFi at that moment) is kept and retried until it goes
+// through: an emergency must not be lost to a few seconds without signal
+static bool sosPending = false;
+static unsigned long sosPendingSince = 0;
+static unsigned long sosLastTry = 0;
+const unsigned long SOS_RETRY_EVERY_MS = 10000;
+const unsigned long SOS_GIVE_UP_AFTER_MS = 30UL * 60UL * 1000UL;  // 30 min
+
+static void sosVibrateAll(uint16_t ms) {
+    hapticsDirection(HazardDirection::LEFT, ms);
+    hapticsDirection(HazardDirection::CENTER, ms);
+    hapticsDirection(HazardDirection::RIGHT, ms);
+}
+
 void handleButton() {
-    if (!sos_requested) {
+    if (sos_requested) {
+        sos_requested = false;
+        Serial.println("🆘 SOS: 5 taps - sending alert");
+        // Immediate feedback that the SOS was registered: all three motors
+        sosVibrateAll(800);
+        if (sendEmergencyAlert("panic_button", "SOS: el usuario presionó el botón de emergencia 5 veces.")) {
+            sosPending = false;
+        } else {
+            Serial.println("🆘 SOS kept: it will be resent as soon as there is a connection");
+            sosPending = true;
+            sosPendingSince = millis();
+            sosLastTry = millis();
+        }
         return;
     }
-    sos_requested = false;
-    Serial.println("🆘 SOS: 5 taps - sending alert");
-    // Immediate feedback that the SOS was registered: all three motors
-    hapticsDirection(HazardDirection::LEFT, 800);
-    hapticsDirection(HazardDirection::CENTER, 800);
-    hapticsDirection(HazardDirection::RIGHT, 800);
-    sendEmergencyAlert("panic_button", "SOS: el usuario presionó el botón de emergencia 5 veces.");
+
+    if (!sosPending) {
+        return;
+    }
+    if (millis() - sosPendingSince > SOS_GIVE_UP_AFTER_MS) {
+        Serial.println("🆘 Pending SOS dropped after 30 minutes without connection");
+        sosPending = false;
+        return;
+    }
+    if (WiFi.status() != WL_CONNECTED || millis() - sosLastTry < SOS_RETRY_EVERY_MS) {
+        return;
+    }
+    sosLastTry = millis();
+    Serial.println("🆘 Resending the pending SOS");
+    if (sendEmergencyAlert("panic_button",
+                           "SOS (enviado con retraso por falta de conexión): el usuario presionó el botón de emergencia 5 veces.")) {
+        sosPending = false;
+        sosVibrateAll(300);  // short buzz: the delayed SOS went through
+    }
 }
 
 void checkAndAnnounceNearbyPlaces() {
@@ -1826,7 +1918,7 @@ void loop() {
         } else if (millis() - quietSince > GUIDE_QUIET_MS && millis() - lastGuideAt > GUIDE_EVERY_MS) {
             lastGuideAt = millis();
             Serial.println("🦮 Guide mode: asking Gemini to describe the path ahead");
-            visionAssistant.queueUserCommand("GUIDE MODE: en una frase corta, ¿cómo está el camino delante de mí?");
+            visionAssistant.queueUserCommand("GUIDE MODE: en una frase corta, ¿cómo está el camino delante de mí? Si algo está muy cerca, a punto de chocar o bloquea el paso, usa obstacle_alert con su dirección.");
         }
     }
 
