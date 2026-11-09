@@ -25,3 +25,8 @@ Thumbs.db
 __pycache__/
 
 .vercel
+
+# Grabaciones y modelos del entrenamiento de "Vision" (voces del equipo, pesan mucho)
+grab/
+clips/
+*.eim

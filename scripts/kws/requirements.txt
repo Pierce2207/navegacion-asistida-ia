@@ -1,0 +1,7 @@
+# pip install -r scripts/kws/requirements.txt
+numpy
+pyserial          # capturar_esp32.py
+sounddevice       # grabar_pc.py
+requests          # subir_edge_impulse.py
+# evaluar_modelo.py (Linux, macOS o WSL en Windows):
+# edge_impulse_linux
