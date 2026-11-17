@@ -1,9 +1,9 @@
-# Sistema portátil de navegación asistida con IA
 
+# MURDOCK: Asistente portátil de navegación con IA
 
 ## Descripción
 
-Este proyecto parte del hardware y firmware de **Halo**, un asistente portátil que ayuda a personas con baja visión a moverse con más seguridad usando cámara en vivo, IA (Gemini Live), reconocimiento y síntesis de voz, y GPS:
+**MURDOCK** parte del hardware y firmware de **Halo**, un asistente portátil que ayuda a personas con baja visión a moverse con más seguridad usando cámara en vivo, IA (Gemini Live), reconocimiento y síntesis de voz, y GPS:
 
 - Firmware original: [ilikecandy/SSCS-2025-Arduino](https://github.com/ilikecandy/SSCS-2025-Arduino)
 - Backend original: [StockerMC/SSCS-2025-API](https://github.com/StockerMC/SSCS-2025-API)
@@ -13,7 +13,7 @@ Este proyecto parte del hardware y firmware de **Halo**, un asistente portátil 
 Sobre esa base, nuestro equipo añade dos componentes propios:
 
 1. **Retroalimentación háptica direccional** (`firmware/lib/haptic/`) — 3 motores de vibración (izquierda/centro/derecha) que avisan peligros sin depender del canal de voz, activados por las alertas de Gemini y por la red de peligros compartidos.
-2. **Red comunitaria de peligros compartidos** (`api/hazards.js`, `sql/hazards_schema.sql`) — los peligros detectados por un dispositivo, una vez confirmados por varios usuarios independientes, se comparten con otros dispositivos Halo cercanos antes de que su propia cámara los detecte.
+2. **Red comunitaria de peligros compartidos** (`api/hazards.js`, `sql/hazards_schema.sql`) — los peligros detectados por un dispositivo, una vez confirmados por varios usuarios independientes, se comparten con otros dispositivos MURDOCK cercanos antes de que su propia cámara los detecte.
 
 Ver `docs/` para la guía de construcción completa (lista de materiales, conexiones, costos) y el detalle de diseño de ambas mejoras.
 
