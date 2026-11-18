@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include "haptic_driver.h"
 #include "navigation.h"
+#include "wake_word_local.h"
 
 VisionAssistant visionAssistant;
 TTS tts;
@@ -84,6 +85,17 @@ volatile bool wakeSearchBusy = false;  // stt_temp_buffer is in use by the searc
 volatile bool wakeSearchHit = false;   // result of the last finished search, consumed by audioTask
 volatile bool priority_request = false; // SOS / navigation HTTPS in flight: no new wake word searches
 
+// Motor de la palabra de activacion. Con -DWAKE_WORD_LOCAL (entorno "wake-local") "vision" se
+// detecta en la placa con el modelo de Edge Impulse (wake_word_local.*), sin WiFi y en ~0.3 s.
+// Sin ese #define, o si el modelo no arranca, se usa la busqueda en Deepgram (respaldo).
+// Con -DWAKE_LOCAL_CONFIRM_DEEPGRAM ademas, cada deteccion local se confirma con una sola busqueda
+// en Deepgram antes de abrir el microfono (menos falsos positivos, ~1-2 s mas solo en ese caso).
+bool wakeEngineLocal = false;
+#ifdef WAKE_WORD_LOCAL
+TaskHandle_t WakeLocalTaskHandle = NULL;
+int wake_local_window_bytes = 0;  // bytes del ultimo segundo que se copian a stt_temp_buffer
+#endif
+
 // Spoken command streaming: the audio task records into command_buffer, and the main loop
 // (which owns the Gemini WebSocket) forwards it as 8 kHz audio while the user is still talking.
 volatile bool voice_stream_active = false;    // a command is being (or about to be) streamed
@@ -122,6 +134,9 @@ struct CommandMessage {
 // Function declarations
 void audioTask(void *pvParameters);
 void wakeSearchTask(void *pvParameters);
+#ifdef WAKE_WORD_LOCAL
+void wakeLocalTask(void *pvParameters);
+#endif
 void process_audio();
 void playDingSound();
 void playButtonDingSound();
@@ -864,9 +879,23 @@ void setup() {
     // Wake word search task on Core 1 so it never competes with mic reads on Core 0.
     // 8KB like the audio task that used to run this search: every KB of stack comes out of the
     // internal heap that the TLS connections (Gemini WS + Deepgram) need.
-    xTaskCreatePinnedToCore(wakeSearchTask, "WakeSearch", 8192, NULL, 1, &WakeSearchTaskHandle, 1);
-    if (WakeSearchTaskHandle == NULL) {
-        Serial.println("CRITICAL: Failed to create wake word search task!");
+#ifdef WAKE_WORD_LOCAL
+    // Modelo local en Core 1: la clasificacion (~100-300 ms) no frena las lecturas del mic en Core 0.
+    // Mismo stack de 8KB que la tarea de Deepgram a la que reemplaza, asi la RAM interna no cambia.
+    wake_local_window_bytes = (int)(wakeWordLocalWindowSamples() * sizeof(int16_t));
+    if (psramFound() && wake_local_window_bytes <= WAKE_WORD_BUFFER_SIZE && wakeWordLocalBegin()) {
+        xTaskCreatePinnedToCore(wakeLocalTask, "WakeLocal", 8192, NULL, 1, &WakeLocalTaskHandle, 1);
+        wakeEngineLocal = (WakeLocalTaskHandle != NULL);
+    }
+    if (!wakeEngineLocal) {
+        Serial.println("⚠️ Modelo local de 'vision' no disponible: usando la busqueda en Deepgram");
+    }
+#endif
+    if (!wakeEngineLocal) {
+        xTaskCreatePinnedToCore(wakeSearchTask, "WakeSearch", 8192, NULL, 1, &WakeSearchTaskHandle, 1);
+        if (WakeSearchTaskHandle == NULL) {
+            Serial.println("CRITICAL: Failed to create wake word search task!");
+        }
     }
 
     // Start audio task on Core 0 (microphone will be initialized there)
@@ -1074,6 +1103,49 @@ void wakeSearchTask(void *pvParameters) {
     }
 }
 
+#ifdef WAKE_WORD_LOCAL
+// Clasifica en la placa el ultimo segundo de audio que audioTask copio a stt_temp_buffer.
+// Usa las mismas banderas que wakeSearchTask (wakeSearchBusy / wakeSearchHit), asi que el resto de
+// audioTask (ding, grabacion, envio a Gemini) no cambia.
+void wakeLocalTask(void *pvParameters) {
+    const size_t samples = wakeWordLocalWindowSamples();
+    unsigned long lastStats = 0;
+    float maxScore = 0.0f;
+    uint32_t windows = 0;
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        float score = wakeWordLocalScore((const int16_t*)stt_temp_buffer, samples);
+        bool hit = score >= 0.0f && wakeWordLocalUpdate(score);
+        windows++;
+        if (score > maxScore) maxScore = score;
+        if (score >= 0.5f) {
+            Serial.printf("🧠 [WakeLocal] vision=%.2f (%u ms)\n", score, wakeWordLocalLastInferenceMs());
+        }
+        if (millis() - lastStats > 30000) {
+            Serial.printf("🧠 [WakeLocal] %u ventanas en 30 s, max vision=%.2f, ultima %u ms\n",
+                          windows, maxScore, wakeWordLocalLastInferenceMs());
+            lastStats = millis();
+            maxScore = 0.0f;
+            windows = 0;
+        }
+#ifdef WAKE_LOCAL_CONFIRM_DEEPGRAM
+        // Segunda opinion de Deepgram solo para los candidatos (no hay TLS si hay un SOS en curso)
+        if (hit && !priority_request && !is_recording) {
+            Serial.println("🧠 [WakeLocal] Candidato: confirmando con Deepgram...");
+            hit = deepgramClient.searchForWakeWords(stt_temp_buffer, samples * sizeof(int16_t),
+                                                    WAKE_WORDS, WAKE_WORDS_COUNT, 0.60f);
+            Serial.printf("🧠 [WakeLocal] Deepgram %s\n", hit ? "confirma" : "descarta");
+        }
+#endif
+        if (hit) {
+            Serial.printf("✅ Wake word detectada en la placa (vision=%.2f)\n", score);
+        }
+        wakeSearchHit = hit && !is_recording;
+        wakeSearchBusy = false;
+    }
+}
+#endif
+
 void audioTask(void *pvParameters) {
     Serial.println("Audio task started on Core 0");
     
@@ -1097,7 +1169,8 @@ void audioTask(void *pvParameters) {
         // Only speech needs this: recording opens no connection, and making push-to-talk wait for
         // a 1-3 s search lost the start of the question (once, all of it: 1 KB recorded in 3 s).
         AudioCommand nextCmd;
-        if (wakeSearchBusy && xQueuePeek(audioCommandQueue, &nextCmd, 0) == pdTRUE &&
+        // (El modelo local no abre conexiones, asi que con el no hace falta esperar.)
+        if (!wakeEngineLocal && wakeSearchBusy && xQueuePeek(audioCommandQueue, &nextCmd, 0) == pdTRUE &&
             nextCmd.type == AudioCommandType::SPEAK_TEXT) {
             while (wakeSearchBusy) {
                 vTaskDelay(pdMS_TO_TICKS(20));
@@ -1167,11 +1240,17 @@ void audioTask(void *pvParameters) {
         // Speech-to-text processing every 1 second for wake word detection (only when not recording)
         // Note: Wake word detection uses Deepgram's search API for acoustic pattern matching
         // Command transcription after wake word still uses regular transcription API
-        if (!is_recording && millis() - last_stt_time > 1000) {
+        // Deepgram: una busqueda por segundo como mucho. Modelo local: cada WAKE_LOCAL_HOP_MS.
+        const unsigned long wakeCheckInterval = wakeEngineLocal ? WAKE_LOCAL_HOP_MS : 1000;
+        if (!is_recording && millis() - last_stt_time > wakeCheckInterval) {
             last_stt_time = millis();
 
             // Check if wake word buffer is allocated and has sufficient data
-            if (!wake_word_buffer || (!wake_word_buffer_has_wrapped && wake_word_buffer_index < 8000)) {
+            int minBufferedBytes = 8000;
+#ifdef WAKE_WORD_LOCAL
+            if (wakeEngineLocal) minBufferedBytes = wake_local_window_bytes;  // ventana completa
+#endif
+            if (!wake_word_buffer || (!wake_word_buffer_has_wrapped && wake_word_buffer_index < minBufferedBytes)) {
                 // Add debug info about buffer state
                 static unsigned long last_debug = 0;
                 if (millis() - last_debug > 10000) {  // Debug every 10 seconds
@@ -1228,6 +1307,20 @@ void audioTask(void *pvParameters) {
                 }
                 
                 // Copy the most recent audio data in proper circular buffer order
+#ifdef WAKE_WORD_LOCAL
+                if (wakeEngineLocal) {
+                    // Solo el ultimo segundo, en orden cronologico, al inicio de stt_temp_buffer
+                    int need = wake_local_window_bytes;
+                    int start = current_index - need;
+                    if (start >= 0) {
+                        memcpy(stt_temp_buffer, wake_word_buffer + start, need);
+                    } else {
+                        int tail = -start;  // bytes que quedan al final del buffer circular
+                        memcpy(stt_temp_buffer, wake_word_buffer + WAKE_WORD_BUFFER_SIZE - tail, tail);
+                        memcpy(stt_temp_buffer + tail, wake_word_buffer, current_index);
+                    }
+                } else
+#endif
                 if (has_wrapped) {
                     // Buffer has wrapped - copy from current position to end, then from start to current
                     int bytes_from_current_to_end = WAKE_WORD_BUFFER_SIZE - current_index;
@@ -1258,6 +1351,9 @@ void audioTask(void *pvParameters) {
             bool hasRealAudio = false;
             int16_t* samples = (int16_t*)stt_temp_buffer;
             int sampleCount = WAKE_WORD_BUFFER_SIZE / 2;
+#ifdef WAKE_WORD_LOCAL
+            if (wakeEngineLocal) sampleCount = wake_local_window_bytes / 2;
+#endif
             for (int i = 0; i < sampleCount; i++) {
                 if (abs(samples[i]) > 50) { // Threshold for real audio
                     hasRealAudio = true;
@@ -1270,6 +1366,15 @@ void audioTask(void *pvParameters) {
             wakeSearchHit = false;
 
             if (!wakeWordDetected) {
+#ifdef WAKE_WORD_LOCAL
+                if (wakeEngineLocal) {
+                    // Sin red de por medio: se clasifica aunque haya un SOS o una respuesta en camino
+                    if (hasRealAudio) {
+                        wakeSearchBusy = true;
+                        xTaskNotifyGive(WakeLocalTaskHandle);
+                    }
+                } else
+#endif
                 if (uxQueueMessagesWaiting(audioCommandQueue) > 0) {
                     // Something is about to be spoken; let it go first (see the wait above)
                 } else if (priority_request) {
@@ -1286,7 +1391,8 @@ void audioTask(void *pvParameters) {
             }
 
             if (wakeWordDetected) {
-                Serial.println("🎙️ Wake word detected via Deepgram search API!");
+                Serial.println(wakeEngineLocal ? "🎙️ Wake word detected on-device!"
+                                               : "🎙️ Wake word detected via Deepgram search API!");
                 
                 // If TTS is active, cancel it immediately
                 if (is_speaking) {

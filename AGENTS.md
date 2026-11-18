@@ -47,6 +47,8 @@ docs/       guía de construcción, hoja de conexiones pin por pin, guion del vi
 cd firmware
 pio run -e esp32cam -t upload    # real
 pio run -e demo -t upload        # GPS simulado en Plaza San Martín, camina a la siguiente esquina cada 20 s
+pio run -e wake-local -t upload  # "Visión" detectada en la placa (modelo Edge Impulse en lib/; respaldo Deepgram)
+pio run -e mic-capture -t upload # graba muestras con el mic de la placa (scripts/kws/capturar_esp32.py)
 pio device monitor               # 115200 baudios
 ```
 - Si `pio` no está en el PATH: `%USERPROFILE%\.platformio\penv\Scripts\pio.exe`.
@@ -75,6 +77,10 @@ motores con PNP 2N3906 (activo en LOW) · alimentación: 2×18650 + BMS HX-2S-JH
 - Supabase (plan gratis) se pausa por inactividad: entrar al dashboard y darle "Resume project".
 
 ## Pendientes
+- Palabra "Visión" local (TinyML): código e instrucciones listos (docs/wake-word/README.md); falta
+  grabar muestras, entrenar en Edge Impulse, copiar la librería a firmware/lib/ y probar en la placa.
+- api/hazards.js no mira `device_id` al fusionar: un solo aparato que reporta 3 veces verifica el
+  peligro solo (lo detecta `node scripts/test_hazards.js --mismo-dispositivo`).
 - Probar la alimentación con baterías (LM2596 ya ajustado a 5.0 V) y agregar el condensador de 1000 µF.
 - Cambiar el módulo cargador por uno **2S (8.4 V), 1 A**: el comprado era 3S (daba 13.3 V).
 - Prueba real en la calle con el hotspot del celular y el GPS.
